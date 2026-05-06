@@ -1,10 +1,10 @@
-# LeanCodex — Spec Document
+# CodexSaver — Spec Document
 
 ## 1. Concept & Vision
 
-**LeanCodex** is a hybrid AI coding router that delegates low-cost, verifiable tasks to DeepSeek while keeping Codex in charge of high-quality reasoning and final validation. The philosophy: _don't replace Codex, shrink it_. Let cheap models do the work; let expensive models do the thinking.
+**CodexSaver** is a cost-aware AI coding router delivered as an MCP (Model Context Protocol) server. Codex calls it as a tool (`codexsaver.delegate_task`) rather than spawning a subprocess. This keeps Codex's心智模型 clean: CodexSaver is not another agent — it is Codex's cost-saving tool.
 
-The tool is delivered as a standalone CLI wrapper (`leancodex`) that speaks JSONL over stdio, making it drop-in compatible with any Codex-like agent via shell tool calls. The primary interface is the Unix pipe: Codex calls `leancodex < task.json`, LeanCodex routes and executes, streams JSONL progress to stdout, and returns a validated result.
+The philosophy: _don't replace Codex, shrink it_. Let cheap models do the work; let expensive models do the thinking.
 
 **Slogan:** _Make Codex cheaper without making it dumber._
 
@@ -14,22 +14,19 @@ The tool is delivered as a standalone CLI wrapper (`leancodex`) that speaks JSON
 
 ### Visual Identity
 
-- **Name:** LeanCodex
+- **Name:** CodexSaver
 - **Tagline:** Make Codex cheaper without making it dumber.
 - **Primary palette:** terminal-native, monospace-first, minimal chrome
-- **Font:** system monospace (no web fonts needed for CLI tool)
-- **No external UI** — this is a CLI tool; all feedback is text/JSONL
+- **Font:** system monospace
+- **No external UI** — MCP tool; all feedback is structured JSON
 
-### Log Output Aesthetic
-
-Every invocation produces structured, human-readable log lines that feel "intelligent":
+### Log Output Aesthetic (for Codex operators)
 
 ```
-[Router] Delegating to DeepSeek (low-risk task, score=2)
+[CodexSaver] Delegating low-risk task to DeepSeek (score=2)
 [DeepSeek] Generated 6 tests in 3.2s
-[Verifier] All tests passed
-[Codex] Final review complete
-[Saved] 62% token cost reduction
+[Verifier] Tests passed
+[CodexSaver] Returning patch to Codex — estimated 62% token savings
 ```
 
 ### README Tone
@@ -43,59 +40,67 @@ Engineer-first: no fluff, numbers first, demo immediately visible.
 ```
 User
   ↓
-Codex (Primary Agent)
-  ↓ shell tool call / MCP / local command
-LeanCodex Router
+Codex (Primary Agent / Brain)
+  ↓ MCP tool call: codexsaver.delegate_task
+CodexSaver MCP Server
   ├─ Task Classifier     (rule-based: delegate or keep)
   ├─ Risk Scorer        (file_risk + task_risk + diff_size + test_confidence)
-  ├─ Context Packer     (prune workspace context for DeepSeek)
-  ├─ Task Runner        (calls DeepSeek-TUI via CLI or HTTP)
+  ├─ Context Packer     (prune workspace context)
+  ├─ Task Runner        (DeepSeek API via openai-compatible client)
   ├─ Verifier           (run tests, lint, parse diff)
-  └─ Fallback Engine    (on failure → escalate to Codex)
+  └─ Fallback Engine    (on failure → return needs_codex)
   ↓
-DeepSeek-TUI
-  ├─ one-shot CLI:  deepseek --model auto "task"
-  ├─ HTTP runtime:  deepseek serve --http
-  └─ ACP stdio:     deepseek serve --acp
+DeepSeek API
   ↓
-Codex (validates and finalizes output)
+CodexSaver Result
+  ↓
+Codex (reviews patch, applies, finalizes)
+```
+
+### MCP Integration
+
+Codex discovers CodexSaver via `~/.codex/config.toml` or project-level `.codex/config.toml`:
+
+```toml
+[mcp_servers.codexsaver]
+command = "python"
+args = ["codexsaver_mcp.py"]
+startup_timeout_sec = 10
+tool_timeout_sec = 120
 ```
 
 ### Data Flow
 
-1. **Input** (`task.json` on stdin or file):
+1. **MCP Input** (tool call from Codex):
    ```json
    {
-     "id": "task_001",
-     "workspace": "/repo",
-     "mode": "plan|edit|test",
-     "model": "auto",
-     "instruction": "add unit tests for user service",
-     "allowed_paths": ["src/user", "tests/user"],
-     "forbidden_paths": ["infra", ".env", "migrations"],
-     "acceptance": ["do not modify production logic", "tests must pass"]
+     "instruction": "Add unit tests for user service",
+     "files": ["src/user/service.ts"],
+     "constraints": ["Do not modify production logic", "Return patch only"]
    }
    ```
 
-2. **Output** (JSONL on stdout, stderr reserved for DeepSeek debug logs):
-   ```jsonl
-   {"type":"started","id":"task_001"}
-   {"type":"progress","message":"scanning src/user"}
-   {"type":"command","cmd":"npm test -- user"}
-   {"type":"file_change","path":"tests/user/service.test.ts","kind":"created"}
-   {"type":"completed","status":"success","summary":"added 6 tests","diff":"..."}
-   ```
-
-3. **Final Result** (wrapped JSON):
+2. **MCP Output** (tool response):
    ```json
    {
-     "status": "success | failed | needs_codex",
-     "summary": "added 6 tests",
+     "status": "success",
+     "route": "deepseek",
+     "summary": "Generated 6 unit tests",
      "changed_files": ["tests/user/service.test.ts"],
-     "commands_run": ["npm test -- user"],
-     "tests": {"command": "npm test -- user", "result": "passed"},
+     "patch": "git diff output",
+     "commands_to_run": ["npm test -- user"],
      "risk_notes": [],
-     "patch": "git diff output"
+     "estimated_savings_percent": 62
+   }
+   ```
+
+3. **Fallback Response** (when Codex must take over):
+   ```json
+   {
+     "status": "needs_codex",
+     "summary": "Task involves auth logic — too high risk to delegate",
+     "risk_notes": ["forbidden path: auth/*"],
+     "suggested_action": "Codex handles this"
    }
    ```
 
@@ -139,7 +144,7 @@ risk = file_risk + task_risk + diff_size + test_confidence
 | Score  | Action                                  |
 |--------|-----------------------------------------|
 | ≤ 3    | DeepSeek executes directly              |
-| 4–6    | DeepSeek executes, Codex validates      |
+| 4–6    | DeepSeek executes, Codex validates       |
 | ≥ 7    | Codex handles it                        |
 
 **High-risk file paths** (never delegated directly):
@@ -165,18 +170,14 @@ Reads task description and workspace, outputs a routing decision with risk score
 
 Prunes workspace context to fit within DeepSeek's context window. Removes boilerplate, node_modules, build artifacts. Outputs a focused prompt with file references.
 
-### 5.3 Task Runner
+### 5.3 DeepSeek Client
 
-Supports three execution modes (priority order):
-
-1. **CLI one-shot** (default, simplest): `deepseek --model auto "<task>"`
-2. **HTTP runtime**: `deepseek serve --http` with SSE streaming
-3. **ACP stdio**: `deepseek serve --acp` for new sessions
+Calls DeepSeek via OpenAI-compatible API (`https://api.deepseek.com`). Supports streaming. Reads `DEEPSEEK_API_KEY` from environment.
 
 ### 5.4 Verifier
 
 After DeepSeek completes:
-1. Parse changed files from JSONL output
+1. Parse changed files from diff
 2. Check forbidden paths were not touched
 3. Run project test suite (`npm test`, `pytest`, etc.)
 4. Run linter if available
@@ -184,119 +185,150 @@ After DeepSeek completes:
 
 ### 5.5 Fallback Engine
 
-If any of these occur, LeanCodex returns `needs_codex`:
-- Test failures after retry
+If any of these occur, CodexSaver returns `needs_codex`:
+- Test failures
 - Diff touches forbidden paths
-- DeepSeek crashes or times out
+- DeepSeek API error or timeout
 - Risk score ≥ 7
 
 ---
 
-## 6. CLI Interface
+## 6. MCP Tool Interface
+
+### Tool Name
 
 ```
-leancodex [--task-json <path>] [--deepseek-model <model>] [--verbose] [--json]
+codexsaver.delegate_task
 ```
 
-| Flag              | Description                          | Default        |
-|-------------------|--------------------------------------|----------------|
-| `--task-json`     | Path to task JSON file               | stdin          |
-| `--deepseek-model`| Model to pass to DeepSeek-TUI        | `auto`         |
-| `--verbose`       | Emit debug logs to stderr             | false          |
-| `--json`          | Emit machine-readable JSON on stdout | false          |
+### Input Schema
 
-When called without arguments, reads `task.json` from stdin.
+```json
+{
+  "instruction": "string (required)",
+  "files": "string[] (optional, files to focus on)",
+  "constraints": "string[] (optional, instructions for DeepSeek)",
+  "workspace": "string (optional, defaults to cwd)"
+}
+```
+
+### Output Schema
+
+```json
+{
+  "status": "success | failed | needs_codex",
+  "route": "deepseek | codex",
+  "summary": "string",
+  "changed_files": "string[]",
+  "patch": "string",
+  "commands_to_run": "string[]",
+  "risk_notes": "string[]",
+  "estimated_savings_percent": "number"
+}
+```
 
 ---
 
-## 7. MVP Implementation Plan
+## 7. Codex Policy (AGENTS.md)
 
-### Week 1: CLI Wrapper
+```markdown
+# CodexSaver Policy
 
-- `deepseek-worker` script (shell + Python)
-- Basic task classifier (keyword matching)
-- One-shot CLI delegation
-- JSONL stdout streaming
-- Git diff + test verification
+You have access to a tool named `codexsaver.delegate_task`.
 
-### Week 2: Router Engine
+## When to Use CodexSaver
 
-- Task classifier (improved)
-- Risk scorer
-- Context packer
-- Cost tracker
-- Fallback to Codex logic
+Use CodexSaver for:
+- repo scanning
+- code explanation
+- writing tests
+- simple refactors
+- lint/type fixes
+- documentation updates
+- boilerplate generation
 
-### Week 3: Verification Loop
+Do NOT use CodexSaver for:
+- architecture decisions
+- auth/security/payment logic
+- database migrations
+- ambiguous requirements
+- final review
 
-- Diff parser
-- Test runner
-- Lint runner
-- Changed-file risk policy
-- Codex final review prompt
+## Workflow
 
-### Week 4: HTTP/SSE Runtime
-
-- Replace one-shot with `deepseek serve --http`
-- Streaming state updates
-- Task cancellation
-- Session resume
+1. If task is low-risk, call `codexsaver.delegate_task`.
+2. Review the returned patch carefully.
+3. Run or recommend tests.
+4. Apply only if safe.
+5. If CodexSaver returns `needs_codex`, take over yourself.
+```
 
 ---
 
-## 8. Success Metrics
+## 8. File Structure
+
+```
+codexsaver/
+├── SPEC.md
+├── README.md
+├── codexsaver_mcp.py        # MCP server entry point
+├── codexsaver/
+│   ├── __init__.py
+│   ├── router.py            # Task classification + risk scoring
+│   ├── packer.py            # Context pruning
+│   ├── deepseek_client.py   # DeepSeek API client
+│   ├── verifier.py          # Diff + test verification
+│   ├── fallback.py          # Escalation logic
+│   └── models.py           # Task/Result dataclasses
+├── .codex/
+│   └── config.toml          # Codex MCP configuration
+├── AGENTS.md                # Codex policy
+└── tests/
+    └── ...
+```
+
+---
+
+## 9. Success Metrics
 
 | Metric                              | Target                      |
 |-------------------------------------|-----------------------------|
 | Codex token cost reduction           | 40–70%                      |
-| Task success rate delta              | < 3% degradation             |
-| Average completion time delta        | < 20% increase               |
+| Task success rate delta              | < 3% degradation            |
+| Average completion time delta        | < 20% increase              |
 | DeepSeek output re-do rate by Codex  | < 25%                       |
 | Test pass rate                       | ≥ current Codex-only baseline |
 | High-risk file DeepSeek direct edits | 0                           |
 
 ---
 
-## 9. Design Principles
+## 10. Design Principles
 
 1. **DeepSeek can write, Codex must validate.** The split is by _verification difficulty_, not by _task type alone_.
 2. **Fail fast and escalate.** One DeepSeek failure → escalate to Codex. Never burn tokens on retry loops.
-3. **Zero friction for Codex.** LeanCodex is invoked as a single shell command; Codex sees only stdout.
+3. **Zero friction for Codex.** CodexSaver is an MCP tool — no shell spawning, no stdio pipe parsing.
 4. **Observable.** Every step logs its decision so operators can audit routing behavior.
 5. **Token savings first.** Every feature is justified by cost reduction or quality maintenance.
-
----
-
-## 10. File Structure
-
-```
-leancodex/
-├── SPEC.md
-├── README.md
-├── src/
-│   ├── __init__.py
-│   ├── router.py          # Task classification + risk scoring
-│   ├── packer.py          # Context pruning
-│   ├── runner.py          # DeepSeek execution
-│   ├── verifier.py        # Diff + test verification
-│   └── fallback.py        # Escalation logic
-├── bin/
-│   └── leancodex          # Entry point CLI script
-├── tests/
-│   └── ...
-└── docs/
-    └── ...
-```
+6. **CodexSaver never touches code directly.** It returns a patch; Codex applies it.
 
 ---
 
 ## 11. Out of Scope (MVP)
 
-- MCP server (Phase 2)
+- CLI wrapper (deprecated — MCP is primary)
 - Learning-based routing
 - Web dashboard
 - Multi-workspace support
-- DeepSeek session resume (Phase 2)
+- DeepSeek session resume
+
+---
+
+## 12. Environment Variables
+
+| Variable           | Description                  | Required |
+|--------------------|------------------------------|----------|
+| `DEEPSEEK_API_KEY` | DeepSeek API key             | Yes      |
+| `DEEPSEEK_BASE_URL`| DeepSeek API base URL        | No (defaults to api.deepseek.com) |
 
 ---
 
