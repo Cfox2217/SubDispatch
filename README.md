@@ -2,6 +2,8 @@
 
 > Cut your Codex cost by 40–70% — without sacrificing quality.
 
+![CodexSaver](./CodexSaver.png)
+
 ---
 
 ## What is CodexSaver?

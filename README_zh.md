@@ -2,6 +2,8 @@
 
 > 在不降低效果的前提下，降低 40–70% 的 Codex 成本
 
+![CodexSaver](./CodexSaver.png)
+
 ---
 
 ## CodexSaver 是什么？
