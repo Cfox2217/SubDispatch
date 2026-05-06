@@ -1,0 +1,9 @@
+[project]
+name = "codexsaver"
+version = "0.2.0"
+description = "Cost-aware DeepSeek delegation tool for Codex"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+codexsaver = "cli:main"
