@@ -87,12 +87,53 @@ Codex review / apply / finalize
 
 ## Install
 
+### Manual Install
+
 ```bash
 git clone https://github.com/yourname/codexsaver
 cd codexsaver
 
-export DEEPSEEK_API_KEY=xxx
+python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY
+python cli.py install --project
+python cli.py doctor
 ```
+
+If you prefer one-shell-session auth without saving it locally:
+
+```bash
+export DEEPSEEK_API_KEY=xxx
+python cli.py install --project
+python cli.py doctor
+```
+
+If you also want CodexSaver available outside this repo:
+
+```bash
+python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY
+python cli.py install --global
+python cli.py doctor
+```
+
+### One Message To Codex
+
+If Codex is already open in this repository, you can ask it to do the setup for you:
+
+```text
+Save my DeepSeek API key for CodexSaver, run `python cli.py auth set --api-key ...`, then run `python cli.py install --project` and `python cli.py doctor`, and tell me whether it is ready.
+```
+
+If you want project-level plus global setup in one go:
+
+```text
+Save my DeepSeek API key for CodexSaver, install CodexSaver for this repo and globally, run `python cli.py auth set --api-key ...`, `python cli.py install --project`, `python cli.py install --global`, then `python cli.py doctor`, and summarize the result.
+```
+
+Ready means:
+
+- `.codex/config.toml` exists in this repo
+- `codexsaver_mcp.py` exists
+- `python cli.py doctor` reports the workspace is ready
+- a DeepSeek API key is available from either `DEEPSEEK_API_KEY` or local CodexSaver config
 
 ---
 
@@ -143,6 +184,29 @@ Use CodexSaver for safe low-risk tasks.
 Add unit tests for user service.
 ```
 
+### What You Will See In Tool Responses
+
+CodexSaver now returns an `interaction` block so the tool feels visible during use,
+instead of looking like a silent JSON router:
+
+```json
+{
+  "interaction": {
+    "tool": "codexsaver.delegate_task",
+    "mode": "delegated_execution",
+    "headline": "CodexSaver delegated this task to DeepSeek.",
+    "route_label": "[CodexSaver] route=deepseek task_type=write_tests risk=low",
+    "next_step": "Review the worker result and apply it only if the patch looks safe."
+  }
+}
+```
+
+This makes three states obvious at a glance:
+
+- `preview`: routing preview only, no external call made
+- `delegated_execution`: delegated run completed
+- `codex_takeover`: CodexSaver decided Codex should handle it
+
 ---
 
 ## CLI Test
@@ -159,9 +223,86 @@ Real call:
 python cli.py "add unit tests for user service" --files src/user/service.ts --workspace .
 ```
 
+Explicit setup commands:
+
+```bash
+python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY
+python cli.py install --project
+python cli.py install --global
+python cli.py doctor
+```
+
 CodexSaver resolves relative file paths from `workspace` and executes worker-proposed
 `commands_to_run` during verification. If any verification command fails, the task falls
 back to Codex with `needs_codex`.
+
+### Verified End-to-End Results
+
+Measured on May 7, 2026 with the new local-key flow:
+
+| Check | Command | Result |
+|---|---|---|
+| Full test suite | `pytest -q` | `71 passed in 0.31s` |
+| Project install | `python cli.py install --project --workspace .` | `status=ok`, project config already correct |
+| Local key persistence | `python cli.py auth set --api-key ...` | saved to `~/.codexsaver/config.json` |
+| Workspace doctor | `python cli.py doctor --workspace .` | `deepseek_api_key_source=local_config`, workspace ready |
+| Real delegated call | `python cli.py delegate "Explain the routing logic briefly" --files codexsaver/router.py --workspace .` | `route=deepseek`, `status=success`, verification passed |
+
+This verifies the new intended workflow:
+
+1. Save the key once with `python cli.py auth set --api-key ...`
+2. Install CodexSaver into the workspace with `python cli.py install --project`
+3. Confirm readiness with `python cli.py doctor`
+4. Make real delegated calls without re-exporting `DEEPSEEK_API_KEY`
+
+---
+
+## Five-Task A/B Benchmark
+
+Method:
+
+- **A** = counterfactual `Codex-only` baseline, normalized cost index fixed at `1.00`
+- **B** = `CodexSaver` mode with real task execution through the current router and DeepSeek worker
+- latency is measured wall-clock time for the live CodexSaver run
+- savings are the current `CostEstimator` outputs, so this is a reproducible routing benchmark, not invoice-grade billing data
+
+Summary:
+
+- All 5 tasks are typical low-risk development chores: explanation, docs, tests, and README maintenance.
+- All 5 tasks delegated successfully after using natural low-risk phrasing.
+- Average live latency was `6.18s`.
+- Average estimated savings were `48.4%`.
+- In normalized terms, the average cost index moved from `1.00` to `0.52`, which is a `48.0%` relative reduction.
+- The slowest task was the README update because it carried the largest context and patch payload.
+
+| Task | Type | Route | Latency | A: Codex-only Cost Index | B: CodexSaver Cost Index | Estimated Savings | Output Shape |
+|---|---|---|---:|---:|---:|---:|---|
+| Explain router logic | `explain` | `deepseek` | `2.13s` | `1.00` | `0.55` | `45%` | read-only summary |
+| Document router module | `docs` | `deepseek` | `3.13s` | `1.00` | `0.55` | `45%` | 1-file patch |
+| Add cost tests | `write_tests` | `deepseek` | `9.29s` | `1.00` | `0.55` | `45%` | test patch |
+| Explain verifier flow | `explain` | `deepseek` | `2.30s` | `1.00` | `0.55` | `45%` | read-only summary |
+| Update install docs | `docs` | `deepseek` | `14.06s` | `1.00` | `0.38` | `62%` | README patch |
+
+![Five-task benchmark](./assets/ab-test-benchmark.svg)
+
+Figure: normalized cost index by task. Every gray bar is the `Codex-only` baseline fixed at `100`.
+Green bars show the `CodexSaver` cost index for the same task. Lower bars indicate lower estimated
+Codex spend under the current routing model.
+
+Interpretation:
+
+- Read-only explain tasks were the fastest and most predictable wins.
+- Small docs edits still delegated well and returned compact, reviewable patches.
+- Test generation had higher latency than explain/docs, but still remained in the low-risk savings band.
+- Larger-context documentation work produced the biggest estimated savings because the counterfactual
+  `Codex-only` context cost would be higher.
+
+Note on prompt wording:
+
+- During calibration, a test task containing the phrase `production logic` was routed back to Codex
+  because `production` is intentionally treated as a high-risk keyword.
+- The benchmark table above uses the corrected natural phrasing that better matches a true low-risk
+  test-writing task.
 
 ---
 

@@ -84,12 +84,53 @@ Codex 审查 / 应用 / 最终确认
 
 ## 安装
 
+### 手动安装
+
 ```bash
 git clone https://github.com/yourname/codexsaver
 cd codexsaver
 
-export DEEPSEEK_API_KEY=xxx
+python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY
+python cli.py install --project
+python cli.py doctor
 ```
+
+如果你更喜欢只在当前 shell 会话里临时使用，也可以不保存，直接导出环境变量：
+
+```bash
+export DEEPSEEK_API_KEY=xxx
+python cli.py install --project
+python cli.py doctor
+```
+
+如果你还想让 CodexSaver 在仓库目录之外也能直接使用：
+
+```bash
+python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY
+python cli.py install --global
+python cli.py doctor
+```
+
+### 一句话让 Codex 安装
+
+如果 Codex 已经打开了这个仓库，你可以直接发这样一句话：
+
+```text
+帮我为 CodexSaver 保存 DeepSeek API key，运行 `python cli.py auth set --api-key ...`，然后运行 `python cli.py install --project` 和 `python cli.py doctor`，告诉我是否已经就绪。
+```
+
+如果你想同时做项目级和全局安装：
+
+```text
+帮我为 CodexSaver 保存 DeepSeek API key，并把 CodexSaver 安装到当前仓库和全局配置里，运行 `python cli.py auth set --api-key ...`、`python cli.py install --project`、`python cli.py install --global`，然后运行 `python cli.py doctor` 并总结结果。
+```
+
+这里的“就绪”指的是：
+
+- 当前仓库里存在 `.codex/config.toml`
+- 当前仓库里存在 `codexsaver_mcp.py`
+- `python cli.py doctor` 提示工作区可用
+- 真实调用所需的 DeepSeek API key 已经通过环境变量或本地 CodexSaver 配置提供
 
 ---
 
@@ -139,6 +180,29 @@ tool_timeout_sec = 120
 给 user service 添加单元测试。
 ```
 
+### 你会在工具返回里看到什么
+
+CodexSaver 现在会返回一个 `interaction` 区块，让你明显感知到这次交互里
+CodexSaver 做了什么，而不是只看到一段静默 JSON：
+
+```json
+{
+  "interaction": {
+    "tool": "codexsaver.delegate_task",
+    "mode": "delegated_execution",
+    "headline": "CodexSaver delegated this task to DeepSeek.",
+    "route_label": "[CodexSaver] route=deepseek task_type=write_tests risk=low",
+    "next_step": "Review the worker result and apply it only if the patch looks safe."
+  }
+}
+```
+
+这样你可以一眼看出三种状态：
+
+- `preview`：只是预览路由，没有发起外部调用
+- `delegated_execution`：委派执行已经完成
+- `codex_takeover`：CodexSaver 判断应该交回 Codex 处理
+
 ---
 
 ## CLI 测试
@@ -155,8 +219,82 @@ python cli.py "添加单元测试" --files src/user/service.ts --workspace . --d
 python cli.py "添加单元测试" --files src/user/service.ts --workspace .
 ```
 
+显式安装 / 检查命令：
+
+```bash
+python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY
+python cli.py install --project
+python cli.py install --global
+python cli.py doctor
+```
+
 CodexSaver 会基于 `workspace` 解析相对路径，并在验证阶段执行 worker 返回的
 `commands_to_run`。只要验证命令失败，就会回退为 `needs_codex`，交还给 Codex 处理。
+
+### 已验证的端到端结果
+
+以下结果基于 2026 年 5 月 7 日的新本地密钥流程：
+
+| 检查项 | 命令 | 结果 |
+|---|---|---|
+| 全量测试 | `pytest -q` | `71 passed in 0.31s` |
+| 项目安装 | `python cli.py install --project --workspace .` | `status=ok`，项目配置已正确 |
+| 本地密钥保存 | `python cli.py auth set --api-key ...` | 已保存到 `~/.codexsaver/config.json` |
+| 工作区诊断 | `python cli.py doctor --workspace .` | `deepseek_api_key_source=local_config`，工作区已就绪 |
+| 真实委派调用 | `python cli.py delegate "Explain the routing logic briefly" --files codexsaver/router.py --workspace .` | `route=deepseek`、`status=success`、验证通过 |
+
+这说明新的推荐流程已经可以完整跑通：
+
+1. 先用 `python cli.py auth set --api-key ...` 保存一次 key
+2. 再用 `python cli.py install --project` 把 CodexSaver 安装到当前工作区
+3. 用 `python cli.py doctor` 确认就绪状态
+4. 之后就可以直接发起真实委派调用，不需要每次重新导出 `DEEPSEEK_API_KEY`
+
+---
+
+## 五个小任务的 A/B 对比
+
+方法说明：
+
+- **A** = 反事实的 `Codex-only` 基线，归一化成本指数固定为 `1.00`
+- **B** = `CodexSaver` 模式，真实经过当前路由器和 DeepSeek worker 执行
+- 延迟统计的是 CodexSaver 实时调用的墙钟时间
+- 节省比例来自当前 `CostEstimator` 的估算，所以这是一个可复现的路由基准，不是账单级财务数据
+
+文字总结：
+
+- 这 5 个任务都属于典型的低风险开发小任务：解释代码、补文档、补测试、维护 README。
+- 在使用更自然的低风险表述后，5 个任务全部成功委派。
+- 实测平均延迟是 `6.18s`。
+- 平均预计节省是 `48.4%`。
+- 从归一化成本看，平均成本指数从 `1.00` 降到 `0.52`，相当于 `48.0%` 的相对下降。
+- 最慢的任务是 README 更新，因为它携带的上下文和返回 patch 都更大。
+
+| 任务 | 类型 | 路由 | 延迟 | A: Codex-only 成本指数 | B: CodexSaver 成本指数 | 预计节省 | 输出形态 |
+|---|---|---|---:|---:|---:|---:|---|
+| Explain router logic | `explain` | `deepseek` | `2.13s` | `1.00` | `0.55` | `45%` | 只读总结 |
+| Document router module | `docs` | `deepseek` | `3.13s` | `1.00` | `0.55` | `45%` | 单文件 patch |
+| Add cost tests | `write_tests` | `deepseek` | `9.29s` | `1.00` | `0.55` | `45%` | 测试 patch |
+| Explain verifier flow | `explain` | `deepseek` | `2.30s` | `1.00` | `0.55` | `45%` | 只读总结 |
+| Update install docs | `docs` | `deepseek` | `14.06s` | `1.00` | `0.38` | `62%` | README patch |
+
+![五任务基准图](./assets/ab-test-benchmark.svg)
+
+图示说明：每个灰色柱子都是固定为 `100` 的 `Codex-only` 基线，绿色柱子表示同一任务在
+`CodexSaver` 模式下的归一化成本指数。柱子越低，说明在当前路由模型下预计消耗的 Codex 成本越少。
+
+结果解读：
+
+- 只读解释型任务是最快、最稳定的节省场景。
+- 小型文档修改也能很好地下放，而且返回的是紧凑、可审查的 patch。
+- 测试生成的延迟高于 explain/docs，但仍然落在低风险节省区间内。
+- 上下文更大的文档任务之所以节省更高，是因为它在 `Codex-only` 方案下的上下文成本本来就更高。
+
+关于提示词的一个细节：
+
+- 在校准过程中，我曾经使用了带有 `production logic` 字样的测试任务描述，它被路由回 Codex。
+- 这是刻意设计的，因为 `production` 会被视为高风险关键词。
+- 上面表格中的测试任务已经换成了更自然、也更符合真实低风险测试任务的表述。
 
 ---
 

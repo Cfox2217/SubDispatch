@@ -6,6 +6,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict
 
+from .config import resolve_api_key
 from .schema import WorkerTask, to_dict
 
 
@@ -43,13 +44,13 @@ class DeepSeekClient:
 
     def __init__(self, api_key: str | None = None, model: str | None = None,
                  base_url: str | None = None, timeout_seconds: int = 120):
-        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+        self.api_key, self.api_key_source = resolve_api_key(api_key)
         self.model = model or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
         self.base_url = base_url or os.environ.get(
             "DEEPSEEK_BASE_URL", "https://api.deepseek.com/chat/completions")
         self.timeout_seconds = timeout_seconds
         if not self.api_key:
-            raise DeepSeekError("Missing DEEPSEEK_API_KEY.")
+            raise DeepSeekError("Missing DeepSeek API key. Set DEEPSEEK_API_KEY or run `python cli.py auth set --api-key ...`.")
 
     def complete_task(self, task: WorkerTask) -> Dict[str, Any]:
         payload = {

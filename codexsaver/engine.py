@@ -60,6 +60,14 @@ class CodexSaverEngine:
                 "route": "codex", "status": "needs_codex",
                 "decision": to_dict(decision), "estimated_savings_percent": 0,
                 "message": "CodexSaver recommends Codex handle this task directly.",
+                "interaction": self._interaction_payload(
+                    decision=to_dict(decision),
+                    route="codex",
+                    status="needs_codex",
+                    estimated_savings_percent=0,
+                    mode="codex_takeover",
+                    detail="Protected domain or ambiguous task detected before delegation.",
+                ),
             }
 
         estimated_savings = self.cost.estimate_savings_percent(task, delegated=True)
@@ -70,6 +78,14 @@ class CodexSaverEngine:
                 "decision": to_dict(decision),
                 "estimated_savings_percent": estimated_savings,
                 "task_preview": to_dict(task),
+                "interaction": self._interaction_payload(
+                    decision=to_dict(decision),
+                    route="deepseek",
+                    status="dry_run",
+                    estimated_savings_percent=estimated_savings,
+                    mode="preview",
+                    detail="Dry-run preview only. No external model call was made.",
+                ),
             }
 
         try:
@@ -79,19 +95,68 @@ class CodexSaverEngine:
                 "route": "codex", "status": "failed",
                 "decision": to_dict(decision), "estimated_savings_percent": 0,
                 "message": f"DeepSeek failed; Codex should take over. Error: {e}",
+                "interaction": self._interaction_payload(
+                    decision=to_dict(decision),
+                    route="codex",
+                    status="failed",
+                    estimated_savings_percent=0,
+                    mode="codex_takeover",
+                    detail=f"Delegation failed and control returned to Codex: {e}",
+                ),
             }
 
         verification = self.verifier.verify(worker_result, decision, workspace=task.workspace)
 
+        final_route = "deepseek" if not verification.fallback_to_codex else "codex"
+        final_status = "success" if verification.ok else "needs_codex"
+        final_savings = estimated_savings if verification.ok else 0
+
         return {
-            "route": "deepseek" if not verification.fallback_to_codex else "codex",
-            "status": "success" if verification.ok else "needs_codex",
+            "route": final_route,
+            "status": final_status,
             "decision": to_dict(decision),
-            "estimated_savings_percent": estimated_savings if verification.ok else 0,
+            "estimated_savings_percent": final_savings,
             "verification": to_dict(verification),
             "result": worker_result,
             "codex_instruction": (
                 "Review the patch carefully. Apply only if safe. "
                 "Run or ask the user to run commands_to_run before finalizing."
             ),
+            "interaction": self._interaction_payload(
+                decision=to_dict(decision),
+                route=final_route,
+                status=final_status,
+                estimated_savings_percent=final_savings,
+                mode="delegated_execution" if verification.ok else "codex_takeover",
+                detail=verification.reason,
+            ),
+        }
+
+    def _interaction_payload(self, decision: Dict[str, Any], route: str, status: str,
+                             estimated_savings_percent: int, mode: str,
+                             detail: str) -> Dict[str, Any]:
+        task_type = decision["task_type"]
+        risk = decision["risk"]
+        tool_name = "codexsaver.delegate_task"
+        if route == "deepseek" and status == "success":
+            headline = "CodexSaver delegated this task to DeepSeek."
+            next_step = "Review the worker result and apply it only if the patch looks safe."
+        elif route == "deepseek" and status == "dry_run":
+            headline = "CodexSaver previewed a delegated run."
+            next_step = "Call the tool without dry_run to execute the delegated task."
+        elif status == "failed":
+            headline = "CodexSaver attempted delegation but returned control to Codex."
+            next_step = "Handle the task in Codex or retry after fixing the worker/API issue."
+        else:
+            headline = "CodexSaver kept this task in Codex."
+            next_step = "Use Codex directly because the task is risky, protected, or ambiguous."
+        return {
+            "tool": tool_name,
+            "mode": mode,
+            "headline": headline,
+            "route_label": f"[CodexSaver] route={route} task_type={task_type} risk={risk}",
+            "reason": decision["reason"],
+            "detail": detail,
+            "estimated_savings_percent": estimated_savings_percent,
+            "next_step": next_step,
         }

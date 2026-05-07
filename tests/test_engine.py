@@ -20,6 +20,8 @@ class TestCodexSaverEngine:
         assert result["route"] == "codex"
         assert result["status"] == "needs_codex"
         assert result["estimated_savings_percent"] == 0
+        assert result["interaction"]["mode"] == "codex_takeover"
+        assert "route=codex" in result["interaction"]["route_label"]
 
     def test_delegate_task_routes_unknown_to_codex(self):
         result = self.engine.delegate_task({
@@ -39,6 +41,8 @@ class TestCodexSaverEngine:
         assert result["route"] == "deepseek"
         assert "task_preview" in result
         assert "decision" in result
+        assert result["interaction"]["mode"] == "preview"
+        assert "No external model call" in result["interaction"]["detail"]
 
     def test_delegate_task_calls_deepseek(self):
         with patch("codexsaver.engine.DeepSeekClient") as MockClient:
@@ -61,6 +65,8 @@ class TestCodexSaverEngine:
             assert result["route"] == "deepseek"
             assert result["status"] == "success"
             assert result["estimated_savings_percent"] > 0
+            assert result["interaction"]["mode"] == "delegated_execution"
+            assert "delegated this task to DeepSeek" in result["interaction"]["headline"]
             mock_instance.complete_task.assert_called_once()
 
     def test_delegate_task_deepseek_failure_returns_codex(self):
@@ -77,6 +83,7 @@ class TestCodexSaverEngine:
 
             assert result["route"] == "codex"
             assert result["status"] == "failed"
+            assert result["interaction"]["mode"] == "codex_takeover"
 
     def test_delegate_task_verification_failure(self):
         with patch("codexsaver.engine.DeepSeekClient") as MockClient:
