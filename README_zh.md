@@ -69,7 +69,7 @@ CodexSaver 返回的不是一段静默 JSON。
 ### 手动安装
 
 ```bash
-git clone https://github.com/yourname/codexsaver
+git clone https://github.com/fendouai/CodexSaver
 cd codexsaver
 
 python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY

@@ -2,6 +2,10 @@
 
 > Make Codex cheaper without making it dumber.
 
+<p align="center">
+  <a href="./README_zh.md"><strong>中文文档</strong></a>
+</p>
+
 ![CodexSaver](./CodexSaver.png)
 
 CodexSaver is an MCP tool that turns Codex into a cost-aware router.
@@ -69,7 +73,7 @@ Three states matter:
 ### Manual Install
 
 ```bash
-git clone https://github.com/yourname/codexsaver
+git clone https://github.com/fendouai/CodexSaver
 cd codexsaver
 
 python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY
