@@ -12,6 +12,7 @@ def main() -> int:
     parser.add_argument("instruction")
     parser.add_argument("--files", nargs="*", default=[])
     parser.add_argument("--constraint", action="append", default=[])
+    parser.add_argument("--workspace", default=".")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -19,6 +20,7 @@ def main() -> int:
         "instruction": args.instruction,
         "files": args.files,
         "constraints": args.constraint,
+        "workspace": args.workspace,
         "dry_run": args.dry_run,
     })
     print(json.dumps(result, ensure_ascii=False, indent=2))

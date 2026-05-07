@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import sys
+import tempfile
 import pytest
 from unittest.mock import patch, MagicMock
 from codexsaver.engine import CodexSaverEngine, DEFAULT_CONSTRAINTS
@@ -45,7 +48,7 @@ class TestCodexSaverEngine:
                 "summary": "added tests",
                 "changed_files": ["tests/foo_test.py"],
                 "patch": "diff",
-                "commands_to_run": ["pytest"],
+                "commands_to_run": [f'"{sys.executable}" -c "print(\'ok\')"'],
                 "risk_notes": [],
             }
             MockClient.return_value = mock_instance
@@ -141,3 +144,52 @@ class TestCodexSaverEngine:
 
             task = mock_instance.complete_task.call_args[0][0]
             assert task.files == []
+
+    def test_workspace_is_forwarded_to_worker_and_verifier(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sample = os.path.join(tmpdir, "sample.txt")
+            with open(sample, "w") as f:
+                f.write("hello")
+            with patch("codexsaver.engine.DeepSeekClient") as MockClient:
+                mock_instance = MagicMock()
+                mock_instance.complete_task.return_value = {
+                    "status": "success",
+                    "summary": "done",
+                    "changed_files": [],
+                    "patch": "",
+                    "commands_to_run": [],
+                    "risk_notes": [],
+                }
+                MockClient.return_value = mock_instance
+
+                result = self.engine.delegate_task({
+                    "instruction": "explain this file",
+                    "files": ["sample.txt"],
+                    "workspace": tmpdir,
+                })
+
+                task = mock_instance.complete_task.call_args[0][0]
+                assert task.workspace == os.path.realpath(tmpdir)
+                assert task.files[0].path == os.path.realpath(sample)
+                assert result["verification"]["executed_commands"] == []
+
+    def test_delegate_task_runs_verification_commands(self):
+        with patch("codexsaver.engine.DeepSeekClient") as MockClient:
+            mock_instance = MagicMock()
+            mock_instance.complete_task.return_value = {
+                "status": "success",
+                "summary": "added tests",
+                "changed_files": ["tests/foo_test.py"],
+                "patch": "diff",
+                "commands_to_run": ['python -c "print(123)"'],
+                "risk_notes": [],
+            }
+            MockClient.return_value = mock_instance
+
+            result = self.engine.delegate_task({
+                "instruction": "add unit tests for utils",
+                "files": [],
+            })
+
+            assert result["status"] == "success"
+            assert result["verification"]["executed_commands"][0]["exit_code"] == 0

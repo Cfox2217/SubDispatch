@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import sys
+import tempfile
+
 import pytest
 from codexsaver.verifier import Verifier, REQUIRED_KEYS, VALID_STATUS
 from codexsaver.schema import RouteDecision
@@ -15,7 +19,7 @@ class TestVerifier:
             "summary": "added tests",
             "changed_files": ["tests/foo_test.py"],
             "patch": "diff here",
-            "commands_to_run": ["pytest"],
+            "commands_to_run": [f'"{sys.executable}" -c "print(\'ok\')"'],
             "risk_notes": [],
         }
         result.update(kwargs)
@@ -39,6 +43,7 @@ class TestVerifier:
         v = self.verifier.verify(result, decision)
         assert v.ok is True
         assert v.fallback_to_codex is False
+        assert "print('ok')" in v.executed_commands[0]["command"]
 
     def test_verify_missing_required_key(self):
         result = self.make_result()
@@ -96,10 +101,41 @@ class TestVerifier:
         v = self.verifier.verify(result, decision)
         assert v.ok is True
         assert any("verification commands" in w for w in v.warnings)
+        assert v.executed_commands == []
+
+    def test_verify_runs_commands_in_workspace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self.make_result(commands_to_run=[
+                f'"{sys.executable}" -c "import pathlib; print(pathlib.Path.cwd().name)"'
+            ])
+            decision = self.make_decision()
+            v = self.verifier.verify(result, decision, workspace=tmpdir)
+            assert v.ok is True
+            assert v.executed_commands[0]["exit_code"] == 0
+            assert os.path.basename(tmpdir) in v.executed_commands[0]["stdout"]
+
+    def test_verify_fails_when_command_fails(self):
+        result = self.make_result(commands_to_run=[
+            f'"{sys.executable}" -c "raise SystemExit(3)"'
+        ])
+        decision = self.make_decision()
+        v = self.verifier.verify(result, decision)
+        assert v.ok is False
+        assert v.fallback_to_codex is True
+        assert "Verification command failed" in v.reason
+        assert v.executed_commands[0]["exit_code"] == 3
+
+    def test_verify_rejects_invalid_command_entry(self):
+        result = self.make_result(commands_to_run=[""])
+        decision = self.make_decision()
+        v = self.verifier.verify(result, decision)
+        assert v.ok is False
+        assert "commands_to_run" in v.reason
 
     def test_verify_all_valid_statuses(self):
         for status in VALID_STATUS:
-            result = self.make_result(status=status)
+            commands = [] if status != "success" else [f'"{sys.executable}" -c "print(1)"']
+            result = self.make_result(status=status, commands_to_run=commands)
             decision = self.make_decision()
             v = self.verifier.verify(result, decision)
             assert v is not None

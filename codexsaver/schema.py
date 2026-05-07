@@ -29,6 +29,7 @@ class DelegateTaskInput:
     instruction: str
     files: List[str]
     constraints: List[str]
+    workspace: str = "."
     max_files: int = 8
     max_chars_per_file: int = 24_000
     max_total_chars: int = 120_000
@@ -60,6 +61,7 @@ class VerificationResult:
     fallback_to_codex: bool
     reason: str
     warnings: List[str]
+    executed_commands: List[Dict[str, Any]]
 
 
 def to_dict(obj: Any) -> Dict[str, Any]:

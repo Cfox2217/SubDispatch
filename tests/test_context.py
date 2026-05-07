@@ -61,3 +61,16 @@ class TestContextPacker:
     def test_load_empty_list(self):
         contexts = self.packer.load([])
         assert len(contexts) == 0
+
+    def test_load_resolves_relative_path_from_workspace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nested = os.path.join(tmpdir, "src")
+            os.makedirs(nested)
+            file_path = os.path.join(nested, "example.py")
+            with open(file_path, "w") as f:
+                f.write("print('ok')\n")
+            packer = ContextPacker(workspace=tmpdir)
+            contexts = packer.load(["src/example.py"])
+            assert len(contexts) == 1
+            assert contexts[0].path == os.path.realpath(file_path)
+            assert "print('ok')" in contexts[0].content

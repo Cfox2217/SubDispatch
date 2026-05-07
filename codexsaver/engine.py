@@ -30,6 +30,7 @@ class CodexSaverEngine:
             instruction=input_data["instruction"],
             files=input_data.get("files", []),
             constraints=input_data.get("constraints", []),
+            workspace=input_data.get("workspace", "."),
             max_files=int(input_data.get("max_files", 8)),
             max_chars_per_file=int(input_data.get("max_chars_per_file", 24_000)),
             max_total_chars=int(input_data.get("max_total_chars", 120_000)),
@@ -42,6 +43,7 @@ class CodexSaverEngine:
             max_files=req.max_files,
             max_chars_per_file=req.max_chars_per_file,
             max_total_chars=req.max_total_chars,
+            workspace=req.workspace,
         )
 
         task = WorkerTask(
@@ -49,7 +51,7 @@ class CodexSaverEngine:
             task_type=decision.task_type,
             risk=decision.risk,
             constraints=(req.constraints or []) + DEFAULT_CONSTRAINTS,
-            workspace=str(Path.cwd()),
+            workspace=str(Path(req.workspace).resolve()),
             files=packer.load(req.files),
         )
 
@@ -79,7 +81,7 @@ class CodexSaverEngine:
                 "message": f"DeepSeek failed; Codex should take over. Error: {e}",
             }
 
-        verification = self.verifier.verify(worker_result, decision)
+        verification = self.verifier.verify(worker_result, decision, workspace=task.workspace)
 
         return {
             "route": "deepseek" if not verification.fallback_to_codex else "codex",

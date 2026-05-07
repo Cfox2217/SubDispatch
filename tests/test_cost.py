@@ -81,6 +81,7 @@ class TestSchema:
             fallback_to_codex=False,
             reason="ok",
             warnings=["watch out"],
+            executed_commands=[],
         )
         d = to_dict(vr)
         assert d["ok"] is True

@@ -10,16 +10,17 @@ class ContextPacker:
     """Loads bounded file context for DeepSeek."""
 
     def __init__(self, max_files: int = 8, max_chars_per_file: int = 24_000,
-                 max_total_chars: int = 120_000):
+                 max_total_chars: int = 120_000, workspace: str = "."):
         self.max_files = max_files
         self.max_chars_per_file = max_chars_per_file
         self.max_total_chars = max_total_chars
+        self.workspace = Path(workspace).resolve()
 
     def load(self, file_paths: List[str]) -> List[FileContext]:
         contexts: List[FileContext] = []
         total = 0
         for raw in file_paths[: self.max_files]:
-            path = Path(raw)
+            path = self._resolve_path(raw)
             if not path.exists() or not path.is_file():
                 contexts.append(FileContext(path=raw, content=f"/* CodexSaver: file not found: {raw} */"))
                 continue
@@ -34,3 +35,9 @@ class ContextPacker:
             contexts.append(FileContext(path=str(path), content=content))
             total += len(content)
         return contexts
+
+    def _resolve_path(self, raw: str) -> Path:
+        path = Path(raw)
+        if path.is_absolute():
+            return path
+        return (self.workspace / path).resolve()
