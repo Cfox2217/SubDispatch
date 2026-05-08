@@ -5,7 +5,8 @@ from typing import Any, Dict
 
 from .context import ContextPacker
 from .cost import CostEstimator
-from .deepseek_client import DeepSeekClient, DeepSeekError
+from .config import resolve_provider_config
+from .provider import ProviderClient, ProviderError
 from .router import Router
 from .schema import DelegateTaskInput, WorkerTask, to_dict
 from .verifier import Verifier
@@ -26,6 +27,7 @@ class CodexSaverEngine:
         self.cost = CostEstimator()
 
     def delegate_task(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        provider = resolve_provider_config()
         req = DelegateTaskInput(
             instruction=input_data["instruction"],
             files=input_data.get("files", []),
@@ -76,6 +78,7 @@ class CodexSaverEngine:
             return {
                 "route": "deepseek", "status": "dry_run",
                 "decision": to_dict(decision),
+                "provider": _provider_payload(provider),
                 "estimated_savings_percent": estimated_savings,
                 "task_preview": to_dict(task),
                 "interaction": self._interaction_payload(
@@ -89,12 +92,15 @@ class CodexSaverEngine:
             }
 
         try:
-            worker_result = DeepSeekClient().complete_task(task)
-        except DeepSeekError as e:
+            worker = ProviderClient(provider=provider.name)
+            worker_result = worker.complete_task(task)
+        except ProviderError as e:
             return {
                 "route": "codex", "status": "failed",
-                "decision": to_dict(decision), "estimated_savings_percent": 0,
-                "message": f"DeepSeek failed; Codex should take over. Error: {e}",
+                "decision": to_dict(decision),
+                "provider": _provider_payload(provider),
+                "estimated_savings_percent": 0,
+                "message": f"Worker provider failed; Codex should take over. Error: {e}",
                 "interaction": self._interaction_payload(
                     decision=to_dict(decision),
                     route="codex",
@@ -115,6 +121,7 @@ class CodexSaverEngine:
             "route": final_route,
             "status": final_status,
             "decision": to_dict(decision),
+            "provider": _provider_payload(provider),
             "estimated_savings_percent": final_savings,
             "verification": to_dict(verification),
             "result": worker_result,
@@ -139,7 +146,7 @@ class CodexSaverEngine:
         risk = decision["risk"]
         tool_name = "codexsaver.delegate_task"
         if route == "deepseek" and status == "success":
-            headline = "CodexSaver delegated this task to DeepSeek."
+            headline = "CodexSaver delegated this task to the configured worker provider."
             next_step = "Review the worker result and apply it only if the patch looks safe."
         elif route == "deepseek" and status == "dry_run":
             headline = "CodexSaver previewed a delegated run."
@@ -160,3 +167,17 @@ class CodexSaverEngine:
             "estimated_savings_percent": estimated_savings_percent,
             "next_step": next_step,
         }
+
+
+def _provider_payload(provider) -> Dict[str, Any]:
+    return {
+        "name": provider.name,
+        "model": provider.model,
+        "model_source": provider.model_source,
+        "base_url": provider.base_url,
+        "base_url_source": provider.base_url_source,
+        "api_style": provider.api_style,
+        "requires_api_key": provider.requires_api_key,
+        "api_key_configured": bool(provider.api_key),
+        "api_key_source": provider.api_key_source,
+    }

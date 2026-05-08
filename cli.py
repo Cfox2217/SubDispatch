@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 
 from codexsaver.engine import CodexSaverEngine
-from codexsaver.config import save_api_key
-from codexsaver.installer import doctor, install_config
+from codexsaver.config import PROVIDER_PRESETS, normalize_provider, save_provider_config
+from codexsaver.installer import doctor, install_config, install_global_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,7 +22,7 @@ def _run_delegate(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description="CodexSaver CLI",
         epilog=(
-            "Quick setup: `python cli.py install --project` then "
+            "Quick setup: `python cli.py install` then "
             "`python cli.py doctor`."
         ),
     )
@@ -64,11 +64,22 @@ def _run_subcommand(argv: list[str]) -> int:
 
     auth_parser = subparsers.add_parser(
         "auth",
-        help="Persist a DeepSeek API key locally so it does not need to be exported every time.",
+        help="Persist worker provider settings locally.",
     )
     auth_subparsers = auth_parser.add_subparsers(dest="auth_command", required=True)
-    auth_set_parser = auth_subparsers.add_parser("set", help="Save a DeepSeek API key locally.")
-    auth_set_parser.add_argument("--api-key", required=True)
+    auth_set_parser = auth_subparsers.add_parser("set", help="Save provider settings locally.")
+    auth_set_parser.add_argument("--api-key")
+    auth_set_parser.add_argument("--provider", default="deepseek",
+                                 help="Worker provider name. Defaults to deepseek.")
+    auth_set_parser.add_argument("--model",
+                                 help="Optional model override for the provider.")
+    auth_set_parser.add_argument("--base-url",
+                                 help="Optional OpenAI-compatible chat completions URL.")
+
+    auth_subparsers.add_parser(
+        "providers",
+        help="List built-in worker provider presets.",
+    )
 
     delegate_parser = subparsers.add_parser(
         "delegate",
@@ -84,18 +95,18 @@ def _run_subcommand(argv: list[str]) -> int:
 
     if args.command == "install":
         workspace = Path(args.workspace).resolve()
-        script_path = str((workspace / "codexsaver_mcp.py").resolve())
-        install_project = args.project or not args.global_install
+        install_project = args.project
+        install_global = args.global_install or not args.project
         reports = []
         if install_project:
             reports.append(install_config(
                 str(workspace / ".codex" / "config.toml"),
                 "./codexsaver_mcp.py",
             ))
-        if args.global_install:
-            reports.append(install_config(
+        if install_global:
+            reports.append(install_global_config(
                 str(Path.home() / ".codex" / "config.toml"),
-                script_path,
+                str(workspace),
             ))
         print(json.dumps({
             "status": "ok",
@@ -110,12 +121,48 @@ def _run_subcommand(argv: list[str]) -> int:
         return 0
 
     if args.command == "auth":
-        report = save_api_key(args.api_key)
+        if args.auth_command == "providers":
+            print(json.dumps({
+                "status": "ok",
+                "providers": {
+                    name: {
+                        "model": preset.model,
+                        "base_url": preset.base_url,
+                        "env_keys": list(preset.env_keys),
+                        "api_style": preset.api_style,
+                        "requires_api_key": preset.requires_api_key,
+                    }
+                    for name, preset in sorted(PROVIDER_PRESETS.items())
+                },
+                "custom": "Use --provider custom --base-url https://.../chat/completions",
+            }, ensure_ascii=False, indent=2))
+            return 0
+
+        provider_name = normalize_provider(args.provider)
+        preset = PROVIDER_PRESETS.get(provider_name)
+        if not args.api_key and (preset is None or preset.requires_api_key):
+            parser.error("--api-key is required for this provider")
+
+        report = save_provider_config(
+            provider=args.provider,
+            api_key=args.api_key,
+            model=args.model,
+            base_url=args.base_url,
+        )
         print(json.dumps({
             "status": "ok",
             "config_path": report["config_path"],
-            "deepseek_api_key_saved": True,
-            "deepseek_api_key_preview": report["key_preview"],
+            "provider": report["provider"],
+            "provider_api_key_saved": bool(args.api_key),
+            "provider_api_key_preview": report["key_preview"],
+            "provider_model": report["model"],
+            "provider_base_url": report["base_url"],
+            "provider_api_style": report["api_style"],
+            "provider_requires_api_key": report["requires_api_key"],
+            "deepseek_api_key_saved": report["provider"] == "deepseek",
+            "deepseek_api_key_preview": (
+                report["key_preview"] if report["provider"] == "deepseek" else None
+            ),
             "next_step": "Run `python cli.py doctor` to verify CodexSaver can see the saved key.",
         }, ensure_ascii=False, indent=2))
         return 0

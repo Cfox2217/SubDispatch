@@ -9,13 +9,16 @@
 ![CodexSaver](./CodexSaver.png)
 
 CodexSaver is an MCP tool that turns Codex into a cost-aware router.
-It pushes low-risk development work to DeepSeek, keeps high-risk judgment in Codex,
-and returns enough interaction detail that you can feel when the tool is active.
+It pushes low-risk development work to a cheaper worker LLM, keeps high-risk
+judgment in Codex, and returns enough interaction detail that you can feel when
+the tool is active.
 
 - Lower-cost execution for tests, docs, search, and explanation work
 - Codex stays responsible for architecture, security, protected domains, and final review
-- One-time local API key setup, then real delegated calls without re-exporting env vars
-- Verified with live calls, end-to-end checks, and a five-task benchmark
+- Global-by-default Codex install, so every workspace can use the same MCP tool
+- DeepSeek by default, with presets for OpenAI, Anthropic, Gemini, Qwen, Ollama, LM Studio, and more
+- One-time local provider setup in `~/.codexsaver/config.json`
+- Verified with tests, real DeepSeek calls, and end-to-end MCP launcher checks
 
 ---
 
@@ -31,7 +34,7 @@ Codex is excellent at the first one. It is overqualified for much of the second.
 CodexSaver splits the flow on purpose:
 
 - `Codex` handles reasoning, ambiguity, protected domains, and approval
-- `DeepSeek` handles low-risk throughput work
+- a configured worker provider handles low-risk throughput work
 
 That gives you a practical pattern:
 
@@ -53,7 +56,7 @@ They include an `interaction` block that makes the routing decision visible:
   "interaction": {
     "tool": "codexsaver.delegate_task",
     "mode": "delegated_execution",
-    "headline": "CodexSaver delegated this task to DeepSeek.",
+    "headline": "CodexSaver delegated this task to the configured worker provider.",
     "route_label": "[CodexSaver] route=deepseek task_type=write_tests risk=low",
     "next_step": "Review the worker result and apply it only if the patch looks safe."
   }
@@ -70,29 +73,74 @@ Three states matter:
 
 ## Quick Start
 
-### Manual Install
+### Recommended Global Install
 
 ```bash
 git clone https://github.com/fendouai/CodexSaver
-cd codexsaver
+cd CodexSaver
 
-python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY
-python cli.py install --project
+python cli.py auth set --provider deepseek --api-key YOUR_API_KEY
+python cli.py install
 python cli.py doctor
 ```
 
-If you also want CodexSaver available outside this repo:
+That is it. `python cli.py install` writes a global Codex MCP entry to
+`~/.codex/config.toml` and points it at a stable launcher:
+`~/.codexsaver/codexsaver_mcp.py`.
+
+After that, every Codex workspace can call:
+
+```text
+codexsaver.delegate_task
+```
+
+Use `--project` only when you want a repository-local `.codex/config.toml`:
 
 ```bash
-python cli.py install --global
-python cli.py doctor
+python cli.py install --project
+```
+
+### Provider Setup
+
+DeepSeek is the default because it is inexpensive and exposes an OpenAI-compatible API.
+Switching providers is just one flag:
+
+```bash
+python cli.py auth set --provider openai --api-key YOUR_API_KEY --model gpt-4o-mini
+python cli.py auth set --provider anthropic --api-key YOUR_API_KEY --model claude-3-5-haiku-latest
+python cli.py auth set --provider gemini --api-key YOUR_API_KEY --model gemini-2.0-flash
+python cli.py auth set --provider qwen --api-key YOUR_API_KEY --model qwen-plus
+```
+
+For local models:
+
+```bash
+python cli.py auth set --provider ollama --model llama3.1
+python cli.py auth set --provider lmstudio --model local-model
+```
+
+For any custom OpenAI-compatible endpoint:
+
+```bash
+python cli.py auth set \
+  --provider custom \
+  --api-key YOUR_API_KEY \
+  --base-url https://example.com/v1/chat/completions \
+  --model your-model
+```
+
+See built-in presets:
+
+```bash
+python cli.py auth providers
 ```
 
 If you prefer a temporary one-shell-session setup instead of saving the key locally:
 
 ```bash
-export DEEPSEEK_API_KEY=YOUR_DEEPSEEK_API_KEY
-python cli.py install --project
+export CODEXSAVER_PROVIDER=deepseek
+export CODEXSAVER_API_KEY=YOUR_API_KEY
+python cli.py install
 python cli.py doctor
 ```
 
@@ -101,32 +149,32 @@ python cli.py doctor
 If Codex is already open in this repository, you can just say:
 
 ```text
-Save my DeepSeek API key for CodexSaver, run `python cli.py auth set --api-key ...`, then run `python cli.py install --project` and `python cli.py doctor`, and tell me whether it is ready.
+Save my worker provider API key for CodexSaver, run `python cli.py auth set --provider deepseek --api-key ...`, then run `python cli.py install` and `python cli.py doctor`, and tell me whether it is ready.
 ```
 
-For project plus global setup:
+For repo-local setup:
 
 ```text
-Save my DeepSeek API key for CodexSaver, install CodexSaver for this repo and globally, run `python cli.py auth set --api-key ...`, `python cli.py install --project`, `python cli.py install --global`, then `python cli.py doctor`, and summarize the result.
+Save my worker provider API key for CodexSaver, install CodexSaver only for this repo, run `python cli.py auth set --provider deepseek --api-key ...`, `python cli.py install --project`, then `python cli.py doctor`, and summarize the result.
 ```
 
 Ready means:
 
-- `.codex/config.toml` exists in the repo
-- `codexsaver_mcp.py` exists
-- `python cli.py doctor` reports the workspace is ready
-- a DeepSeek API key is available from either `DEEPSEEK_API_KEY` or local CodexSaver config
+- `~/.codex/config.toml` contains the global `codexsaver` MCP server, or `.codex/config.toml` exists in the repo
+- `~/.codexsaver/codexsaver_mcp.py` exists for global installs
+- provider settings are available from env vars or `~/.codexsaver/config.json`
+- `python cli.py doctor` reports `CodexSaver is ready`
 
 ---
 
 ## 60-Second Demo
 
-Project MCP config:
+Global MCP config created by `python cli.py install`:
 
 ```toml
 [mcp_servers.codexsaver]
 command = "python"
-args = ["./codexsaver_mcp.py"]
+args = ["/Users/you/.codexsaver/codexsaver_mcp.py"]
 startup_timeout_sec = 10
 tool_timeout_sec = 120
 ```
@@ -160,22 +208,41 @@ python cli.py "add unit tests for user service" --files src/user/service.ts --wo
 
 ## Verified Setup Flow
 
-Measured on May 7, 2026 with the local-key workflow:
+Measured on May 8, 2026 with the global install and local-key workflow:
 
 | Check | Command | Result |
 |---|---|---|
-| Full test suite | `pytest -q` | `71 passed in 0.31s` |
-| Project install | `python cli.py install --project --workspace .` | `status=ok`, project config already correct |
-| Local key persistence | `python cli.py auth set --api-key ...` | saved to `~/.codexsaver/config.json` |
-| Workspace doctor | `python cli.py doctor --workspace .` | `deepseek_api_key_source=local_config`, workspace ready |
-| Real delegated call | `python cli.py delegate "Explain the routing logic briefly" --files codexsaver/router.py --workspace .` | `route=deepseek`, `status=success`, verification passed |
+| Full test suite | `PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider` | `86 passed in 0.23s` |
+| Global install | `python cli.py install --workspace .` | `status=ok`, global config points at `~/.codexsaver/codexsaver_mcp.py` |
+| Local provider persistence | `python cli.py auth set --provider deepseek --api-key ...` | saved to `~/.codexsaver/config.json` |
+| Workspace doctor | `python cli.py doctor --workspace .` | `provider_api_key_source=local_config:deepseek`, workspace ready |
+| Global launcher check | `python ~/.codexsaver/codexsaver_mcp.py` with MCP `initialize` | returned `serverInfo.name=codexsaver` |
+| Real DeepSeek call | `python cli.py delegate "Explain the CodexSaver router..." --files codexsaver/router.py --workspace .` | `route=deepseek`, `status=success`, verification passed |
 
 This is the intended workflow:
 
 1. Save the key once
-2. Install CodexSaver into the workspace
+2. Install CodexSaver globally
 3. Confirm readiness with `doctor`
-4. Use real delegated calls without re-exporting `DEEPSEEK_API_KEY`
+4. Use real delegated calls without re-exporting API keys
+
+---
+
+## Provider Matrix
+
+Built-in presets cover the common hosted and local routes:
+
+| Provider | Style | Default model | API key |
+|---|---|---|---|
+| `deepseek` | OpenAI-compatible | `deepseek-chat` | required |
+| `openai` | OpenAI | `gpt-4o-mini` | required |
+| `anthropic` | native Messages API | `claude-3-5-haiku-latest` | required |
+| `gemini` | OpenAI-compatible endpoint | `gemini-2.0-flash` | required |
+| `qwen` | OpenAI-compatible endpoint | `qwen-plus` | required |
+| `ollama` | local OpenAI-compatible endpoint | `llama3.1` | not required |
+| `lmstudio` | local OpenAI-compatible endpoint | `local-model` | not required |
+
+Run `python cli.py auth providers` for the complete list.
 
 ---
 
@@ -306,7 +373,7 @@ Codex
 CodexSaver
   ├─ Router
   ├─ Context Packer
-  ├─ DeepSeek API Worker
+  ├─ Worker LLM Provider
   ├─ Verifier
   └─ Cost Estimator
   ↓
@@ -317,7 +384,7 @@ Core modules:
 
 - `Router`: classify tasks and assign risk
 - `ContextPacker`: bound file context before delegation
-- `DeepSeekClient`: call the worker model
+- `ProviderClient`: call the configured worker model
 - `Verifier`: validate output shape, protected paths, and suggested commands
 - `CostEstimator`: estimate relative savings bands
 
@@ -325,9 +392,10 @@ Core modules:
 
 ## Security And Persistence
 
-- `python cli.py auth set --api-key ...` saves the key to `~/.codexsaver/config.json`
-- `doctor` shows whether the key comes from the environment or the local config
-- live calls use local config automatically if `DEEPSEEK_API_KEY` is not exported
+- `python cli.py auth set --provider ... --api-key ...` saves provider settings to `~/.codexsaver/config.json`
+- the config file is written with local-user-only permissions
+- `doctor` shows whether the key comes from the environment or local config, and only prints a masked preview
+- live calls use local config automatically if no env key is exported
 - if verification fails, CodexSaver falls back to `needs_codex`
 
 ---
@@ -335,9 +403,10 @@ Core modules:
 ## Commands
 
 ```bash
-python cli.py auth set --api-key YOUR_DEEPSEEK_API_KEY
+python cli.py auth providers
+python cli.py auth set --provider deepseek --api-key YOUR_API_KEY
+python cli.py install
 python cli.py install --project
-python cli.py install --global
 python cli.py doctor
 python cli.py delegate "Explain the routing logic briefly" --files codexsaver/router.py --workspace .
 ```
@@ -349,12 +418,13 @@ python cli.py delegate "Explain the routing logic briefly" --files codexsaver/ro
 - [x] MCP server
 - [x] rule-based routing
 - [x] bounded context packing
-- [x] DeepSeek integration
+- [x] DeepSeek default worker integration
+- [x] multi-provider OpenAI-compatible worker support
 - [x] local API key persistence
 - [x] interaction-aware tool responses
 - [x] end-to-end verification flow
 - [ ] cost-aware dynamic routing
-- [ ] multi-model support
+- [ ] cost-aware provider selection
 
 ---
 

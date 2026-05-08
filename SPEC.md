@@ -168,15 +168,15 @@ Reads task description and workspace, outputs a routing decision with risk score
 
 ### 5.2 Context Packer
 
-Prunes workspace context to fit within DeepSeek's context window. Removes boilerplate, node_modules, build artifacts. Outputs a focused prompt with file references.
+Prunes workspace context to fit within the configured worker model's context window. Removes boilerplate, node_modules, build artifacts. Outputs a focused prompt with file references.
 
-### 5.3 DeepSeek Client
+### 5.3 Worker Provider Client
 
-Calls DeepSeek via OpenAI-compatible API (`https://api.deepseek.com`). Supports streaming. Reads `DEEPSEEK_API_KEY` from environment.
+Calls the configured worker provider through an OpenAI-compatible Chat Completions API. DeepSeek remains the default provider, and custom providers can be configured with a base URL and model.
 
 ### 5.4 Verifier
 
-After DeepSeek completes:
+After the worker provider completes:
 1. Parse changed files from diff
 2. Check forbidden paths were not touched
 3. Run project test suite (`npm test`, `pytest`, etc.)
@@ -319,7 +319,7 @@ codexsaver/
 - Learning-based routing
 - Web dashboard
 - Multi-workspace support
-- DeepSeek session resume
+- worker session resume
 
 ---
 
@@ -327,8 +327,26 @@ codexsaver/
 
 | Variable           | Description                  | Required |
 |--------------------|------------------------------|----------|
-| `DEEPSEEK_API_KEY` | DeepSeek API key             | Yes      |
-| `DEEPSEEK_BASE_URL`| DeepSeek API base URL        | No (defaults to api.deepseek.com) |
+| `CODEXSAVER_PROVIDER` | Worker provider name (`deepseek` by default) | No |
+| `CODEXSAVER_API_KEY` | Generic worker provider API key | Yes for live delegation |
+| `CODEXSAVER_BASE_URL` | Generic OpenAI-compatible chat completions URL | Required for custom providers |
+| `CODEXSAVER_MODEL` | Generic worker model override | Required for custom providers |
+| `DEEPSEEK_API_KEY` | Backward-compatible DeepSeek API key | No |
+
+---
+
+## 13. Install Behavior
+
+`python cli.py install` writes a global Codex MCP server entry to
+`~/.codex/config.toml` by default. The entry points to a stable launcher at
+`~/.codexsaver/codexsaver_mcp.py`, so every Codex workspace can use the same
+CodexSaver server without adding per-project config.
+
+Use `python cli.py install --project` only when a repository-local
+`.codex/config.toml` is preferred.
+
+Provider credentials are persisted separately in `~/.codexsaver/config.json`,
+with file permissions restricted to the local user.
 
 ---
 

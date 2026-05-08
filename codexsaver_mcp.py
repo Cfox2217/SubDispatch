@@ -24,7 +24,7 @@ def tool_schema() -> Dict[str, Any]:
     return {
         "name": "delegate_task",
         "description": (
-            "Delegate low-risk coding tasks to DeepSeek API to reduce Codex cost. "
+            "Delegate low-risk coding tasks to a configured low-cost LLM provider to reduce Codex cost. "
             "Use for tests, docs, code search, explanations, lint fixes, boilerplate, "
             "and small refactors. Do not use for high-risk architecture/security/payment/migration tasks."
         ),
