@@ -1,6 +1,19 @@
-# SubDispatch MVP
+# SubDispatch
+
+SubDispatch 正在从 Python MVP 迁移为 Rust 单二进制本地工具。Rust 二进制是后续
+CLI、MCP stdio、worker 调度、git worktree 管理、产物回收、Claude hook 记录和
+本地 Setup/Activity UI 的主路径。Python 实现暂时保留在仓库中，作为行为参考，
+直到 Rust 路径完成充分验收。
 
 SubDispatch 是一个本地脚手架，用于让主 LLM 并行运行子编码代理。主 LLM 负责规划、审查、合并决策和冲突解决。SubDispatch 仅提供隔离执行、状态轮询、产物收集和工作树清理。
+
+运行时依赖刻意保持很小：
+
+- `git`
+- 用户配置的外部 code agent CLI，默认 `claude`
+- 工作区 `.env` 中的模型 API 配置
+
+Rust 二进制运行时不需要 Python 或 Node。
 
 ## 非目标
 
@@ -25,10 +38,10 @@ SubDispatch 追踪三个实体：
 SubDispatch 从工作区根目录的 `.env` 读取项目本地配置。`.env` 被 git 忽略。
 `.env.example` 记录了支持的键。
 
-创建本地文件：
+使用 Rust CLI 创建本地文件：
 
 ```bash
-python cli.py init-env
+subdispatch init-env
 ```
 
 然后直接编辑 `.env`。MVP 支持默认的 `claude-code` worker：
@@ -116,3 +129,24 @@ python cli.py init-env
 - 工作树删除验证目标位于 SubDispatch 工作树根目录下。
 - 产物默认保留。
 - Worker 并发限制被执行。
+
+## Rust CLI
+
+本地开发时：
+
+```bash
+cargo run -- workers --workspace .
+cargo run -- mcp --workspace .
+cargo run -- serve --workspace . --bind 127.0.0.1:8765
+```
+
+打包后二进制使用方式：
+
+```bash
+subdispatch workers --workspace .
+subdispatch mcp --workspace .
+subdispatch serve --workspace . --bind 127.0.0.1:8765
+```
+
+Web UI 不是任务创建控制台，只做 Setup 检查、`.env` 初始化、worker 容量、run/task
+状态、变更文件数量和 Claude hook 活动展示。主 LLM 仍然通过 MCP 或 CLI 创建任务。

@@ -19,9 +19,10 @@ The philosophy: _let the primary agent think; let SubDispatch handle execution._
 
 - **Name:** SubDispatch
 - **Tagline:** Parallel child agents, isolated worktrees.
-- **Primary palette:** terminal-native, monospace-first, minimal chrome
-- **Font:** system monospace
-- **No external UI** — MCP tool and CLI; all feedback is structured JSON
+- **Primary palette:** quiet local-tool UI, readable structured status, minimal chrome
+- **Font:** system UI for Web, structured JSON for CLI/MCP
+- **UI boundary:** Setup and Activity only. No human task creation, review, merge,
+  or approval panel in v1.
 
 ### Log Output Aesthetic
 
@@ -59,7 +60,18 @@ Isolated Git Worktrees
 
 ### MCP Integration
 
-SubDispatch registers as an MCP server via project-level `.codex/config.toml`:
+SubDispatch registers as an MCP server via project-level `.codex/config.toml`.
+The Rust binary is the forward path:
+
+```toml
+[mcp_servers.subdispatch]
+command = "subdispatch"
+args = ["mcp", "--workspace", "."]
+startup_timeout_sec = 10
+tool_timeout_sec = 120
+```
+
+The Python MVP entry is retained only as a migration reference:
 
 ```toml
 [mcp_servers.subdispatch]

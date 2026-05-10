@@ -1,9 +1,23 @@
-# SubDispatch MVP
+# SubDispatch
+
+SubDispatch is being migrated from the Python MVP to a Rust single-binary local
+tool. The Rust binary is now the forward path for CLI, MCP stdio, worker
+dispatch, git worktree management, artifact collection, Claude hook recording,
+and the local Setup/Activity UI. The Python implementation remains in the repo
+as a behavior reference until Rust parity is fully validated.
 
 SubDispatch is a local scaffold for a primary LLM to run child coding agents in
 parallel. The primary LLM owns planning, review, merge decisions, and conflict
 resolution. SubDispatch only provides isolated execution, status polling,
 artifact collection, and worktree cleanup.
+
+Runtime dependencies are intentionally small:
+
+- `git`
+- a configured external code-agent CLI, default `claude`
+- model API credentials in the workspace `.env`
+
+No Python or Node runtime is required for the Rust binary.
 
 ## Non-goals
 
@@ -30,10 +44,10 @@ result manifest path, and artifact directory.
 SubDispatch reads project-local configuration from `.env` in the workspace root.
 `.env` is git-ignored. `.env.example` documents the supported keys.
 
-Create the local file with:
+Create the local file with the Rust CLI:
 
 ```bash
-python cli.py init-env
+subdispatch init-env
 ```
 
 Then edit `.env` directly. The MVP supports the default `claude-code` worker:
@@ -128,3 +142,26 @@ task unless forced. By default it preserves the branch and artifact directory.
 - Worktree deletion verifies the target is under the SubDispatch worktree root.
 - Artifacts are preserved by default.
 - Worker concurrency limits are enforced.
+
+## Rust CLI
+
+During local development:
+
+```bash
+cargo run -- workers --workspace .
+cargo run -- mcp --workspace .
+cargo run -- serve --workspace . --bind 127.0.0.1:8765
+```
+
+Packaged usage is the same without `cargo run --`:
+
+```bash
+subdispatch workers --workspace .
+subdispatch mcp --workspace .
+subdispatch serve --workspace . --bind 127.0.0.1:8765
+```
+
+The Web UI is intentionally not a task console. It provides Setup checks,
+`.env` initialization, worker capacity, run/task status, changed-file counts,
+and Claude hook activity. The primary LLM still creates tasks through MCP or
+CLI.
