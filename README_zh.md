@@ -150,3 +150,21 @@ subdispatch serve --workspace . --bind 127.0.0.1:8765
 
 Web UI 不是任务创建控制台，只做 Setup 检查、`.env` 初始化、worker 容量、run/task
 状态、变更文件数量和 Claude hook 活动展示。主 LLM 仍然通过 MCP 或 CLI 创建任务。
+
+## 安装与发布
+
+为当前项目安装 MCP 配置：
+
+```bash
+subdispatch install --project --workspace .
+subdispatch doctor --workspace .
+```
+
+创建本地发布包：
+
+```bash
+scripts/release.sh
+```
+
+发布细节见 [docs/rust-release.md](docs/rust-release.md)，Python MVP 移除计划见
+[docs/python-removal-plan.md](docs/python-removal-plan.md)。

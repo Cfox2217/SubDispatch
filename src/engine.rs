@@ -1,7 +1,7 @@
 use crate::config::{default_workers, load_env, WorkerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -33,6 +33,10 @@ struct RunState {
     base_commit: String,
     workspace: String,
     created_at: f64,
+    #[serde(default)]
+    workspace_dirty: bool,
+    #[serde(default)]
+    workspace_dirty_summary: Vec<String>,
     tasks: Vec<String>,
 }
 
@@ -47,6 +51,10 @@ struct TaskState {
     branch: String,
     worktree: String,
     base_commit: String,
+    #[serde(default)]
+    workspace_dirty: bool,
+    #[serde(default)]
+    workspace_dirty_summary: Vec<String>,
     #[serde(default)]
     read_scope: Vec<String>,
     #[serde(default)]
@@ -173,6 +181,8 @@ impl SubDispatchEngine {
             .unwrap_or("HEAD")
             .to_string();
         let base_commit = self.git(&["rev-parse", &base_ref])?.trim().to_string();
+        let workspace_dirty_summary = self.workspace_dirty_summary()?;
+        let workspace_dirty = !workspace_dirty_summary.is_empty();
         let run_id = input
             .get("run_id")
             .and_then(Value::as_str)
@@ -194,6 +204,8 @@ impl SubDispatchEngine {
             base_commit: base_commit.clone(),
             workspace: self.workspace.display().to_string(),
             created_at: now_secs(),
+            workspace_dirty,
+            workspace_dirty_summary: workspace_dirty_summary.clone(),
             tasks: Vec::new(),
         };
 
@@ -226,6 +238,8 @@ impl SubDispatchEngine {
                 branch,
                 worktree: worktree.display().to_string(),
                 base_commit: base_commit.clone(),
+                workspace_dirty,
+                workspace_dirty_summary: workspace_dirty_summary.clone(),
                 read_scope: string_array(raw, "read_scope"),
                 write_scope: string_array(raw, "write_scope"),
                 forbidden_paths: string_array(raw, "forbidden_paths"),
@@ -269,22 +283,7 @@ impl SubDispatchEngine {
         self.schedule_queued_tasks(run_id)?;
         self.refresh_run(run_id)?;
         let tasks = self.task_summaries(run_id)?;
-        let terminal = [
-            STATUS_COMPLETED,
-            STATUS_FAILED,
-            STATUS_CANCELLED,
-            STATUS_MISSING,
-        ];
-        let status = if !tasks.is_empty()
-            && tasks.iter().all(|task| {
-                task.get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|value| terminal.contains(&value))
-            }) {
-            "completed"
-        } else {
-            "running"
-        };
+        let status = run_status(&tasks);
         Ok(json!({ "status": status, "run_id": run_id, "tasks": tasks }))
     }
 
@@ -309,6 +308,8 @@ impl SubDispatchEngine {
             "base_commit": task.base_commit,
             "branch": task.branch,
             "worktree": task.worktree,
+            "workspace_dirty": task.workspace_dirty,
+            "workspace_dirty_summary": task.workspace_dirty_summary,
             "changed_files": changed_files,
             "diff": diff,
             "patch_path": patch_path.display().to_string(),
@@ -389,6 +390,9 @@ impl SubDispatchEngine {
                         "goal": run.goal,
                         "base_commit": run.base_commit,
                         "created_at": run.created_at,
+                        "workspace_dirty": run.workspace_dirty,
+                        "workspace_dirty_summary": run.workspace_dirty_summary,
+                        "status": run_status(&tasks),
                         "tasks": tasks,
                     }));
                 }
@@ -679,9 +683,18 @@ impl SubDispatchEngine {
         for task_id in run.tasks {
             let task = self.read_task(run_id, &task_id)?;
             let hook_summary = self.hook_summary(&task)?;
+            let now = now_secs();
             let runtime_seconds = task.started_at.map(|started| {
-                ((task.finished_at.unwrap_or_else(now_secs) - started).max(0.0)).floor() as u64
+                ((task.finished_at.unwrap_or(now) - started).max(0.0)).floor() as u64
             });
+            let last_event_at = hook_summary.get("last_event_at").and_then(Value::as_f64);
+            let idle_seconds = if task.status == STATUS_RUNNING {
+                last_event_at
+                    .or(task.started_at)
+                    .map(|last_activity| ((now - last_activity).max(0.0)).floor() as u64)
+            } else {
+                None
+            };
             let worktree = PathBuf::from(&task.worktree);
             let changed_files_count = if worktree.exists() {
                 self.changed_files(&task)?.len()
@@ -697,11 +710,14 @@ impl SubDispatchEngine {
                 "runtime_seconds": runtime_seconds,
                 "branch": task.branch,
                 "worktree": task.worktree,
+                "workspace_dirty": task.workspace_dirty,
+                "workspace_dirty_summary": task.workspace_dirty_summary,
                 "worktree_exists": worktree.exists(),
                 "branch_exists": self.branch_exists(&task.branch),
                 "manifest_exists": worktree.join(".subdispatch").join("result.json").exists(),
                 "changed_files_count": changed_files_count,
                 "last_event_at": hook_summary.get("last_event_at").cloned(),
+                "idle_seconds": idle_seconds,
                 "last_event_name": hook_summary.get("last_event_name").cloned(),
                 "event_count": hook_summary.get("event_count").and_then(Value::as_u64).unwrap_or(0),
                 "transcript_path": hook_summary.get("transcript_path").cloned(),
@@ -731,6 +747,14 @@ impl SubDispatchEngine {
                 .to_string(),
             "Do not merge, push, or delete branches.".to_string(),
         ];
+        if task.workspace_dirty {
+            lines.push(String::new());
+            lines.push("Important workspace state: this task worktree was created from the recorded base commit, but the primary workspace had uncommitted changes when the run started. Those changes are not present in this worktree unless they are also included below as primary-agent supplied context. Do not assume absent files or old code mean the primary workspace lacks newer uncommitted work.".to_string());
+            lines.push("Primary workspace dirty summary:".to_string());
+            for item in &task.workspace_dirty_summary {
+                lines.push(format!("- {item}"));
+            }
+        }
         let context = self.task_context(task)?;
         if !context.is_empty() {
             lines.push(String::new());
@@ -786,8 +810,10 @@ impl SubDispatchEngine {
                 if let Some((_, dest)) = path.split_once(" -> ") {
                     path = dest.to_string();
                 }
-                if !is_internal_artifact_path(&path) {
-                    push_unique(&mut paths, &path);
+                for file_path in expand_status_path(&worktree, &path)? {
+                    if !is_internal_artifact_path(&file_path) {
+                        push_unique(&mut paths, &file_path);
+                    }
                 }
             }
         }
@@ -812,12 +838,15 @@ impl SubDispatchEngine {
                 if !line.starts_with("?? ") {
                     continue;
                 }
-                let path = &line[3..];
+                let path = line.get(3..).unwrap_or("");
                 if is_internal_artifact_path(path) {
                     continue;
                 }
-                if worktree.join(path).is_file() {
-                    parts.push(self.untracked_file_diff(&worktree, path)?);
+                for file_path in expand_status_path(&worktree, path)? {
+                    if is_internal_artifact_path(&file_path) {
+                        continue;
+                    }
+                    parts.push(self.untracked_file_diff(&worktree, &file_path)?);
                 }
             }
         }
@@ -909,6 +938,18 @@ impl SubDispatchEngine {
         run_command("git", args, cwd)
     }
 
+    fn workspace_dirty_summary(&self) -> Result<Vec<String>, String> {
+        let status = self.git(&["status", "--short"])?;
+        Ok(status
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .filter(|line| !is_sensitive_status_line(line))
+            .take(80)
+            .map(ToOwned::to_owned)
+            .collect())
+    }
+
     fn run_dir(&self, run_id: &str) -> PathBuf {
         self.runs_dir.join(run_id)
     }
@@ -926,7 +967,16 @@ impl SubDispatchEngine {
     }
 
     fn read_task(&self, run_id: &str, task_id: &str) -> Result<TaskState, String> {
-        read_json(&self.task_dir(run_id, task_id).join("task.json"))
+        let mut task: TaskState = read_json(&self.task_dir(run_id, task_id).join("task.json"))?;
+        if !task.workspace_dirty && task.workspace_dirty_summary.is_empty() {
+            if let Ok(run) = self.read_run(run_id) {
+                if run.workspace_dirty {
+                    task.workspace_dirty = true;
+                    task.workspace_dirty_summary = run.workspace_dirty_summary;
+                }
+            }
+        }
+        Ok(task)
     }
 
     fn write_task(&self, task: &TaskState) -> Result<(), String> {
@@ -1083,6 +1133,26 @@ fn forbidden_path_check(changed_files: &[String], forbidden_paths: &[String]) ->
     json!({ "ok": violations.is_empty(), "violations": violations })
 }
 
+fn run_status(tasks: &[Value]) -> &'static str {
+    let terminal = [
+        STATUS_COMPLETED,
+        STATUS_FAILED,
+        STATUS_CANCELLED,
+        STATUS_MISSING,
+    ];
+    if !tasks.is_empty()
+        && tasks.iter().all(|task| {
+            task.get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|value| terminal.contains(&value))
+        })
+    {
+        "completed"
+    } else {
+        "running"
+    }
+}
+
 fn path_in_scope(path: &str, scope: &str) -> bool {
     let scope = scope.trim_end_matches('/');
     path == scope || path.starts_with(&format!("{scope}/"))
@@ -1096,6 +1166,56 @@ fn is_internal_artifact_path(path: &str) -> bool {
         || path == ".pytest_cache"
         || path.starts_with(".pytest_cache/")
         || path == "uv.lock"
+}
+
+fn is_sensitive_status_line(line: &str) -> bool {
+    let path = line.get(3..).unwrap_or(line).trim();
+    path == ".env"
+        || path.starts_with(".env.")
+        || path.contains("/.env")
+        || path.contains("secret")
+        || path.contains("token")
+        || path.contains("key")
+}
+
+fn expand_status_path(worktree: &Path, raw_path: &str) -> Result<Vec<String>, String> {
+    let normalized = raw_path.trim_end_matches('/');
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+    let full_path = worktree.join(normalized);
+    if full_path.is_file() {
+        return Ok(vec![normalized.to_string()]);
+    }
+    if !full_path.is_dir() {
+        return Ok(vec![normalized.to_string()]);
+    }
+
+    let mut files = Vec::new();
+    let mut queue = VecDeque::from([full_path]);
+    while let Some(dir) = queue.pop_front() {
+        for entry in
+            fs::read_dir(&dir).map_err(|err| format!("failed to read {}: {err}", dir.display()))?
+        {
+            let entry = entry.map_err(|err| format!("failed to read directory entry: {err}"))?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(worktree)
+                .map_err(|err| format!("failed to relativize {}: {err}", path.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if is_internal_artifact_path(&relative) {
+                continue;
+            }
+            if path.is_dir() {
+                queue.push_back(path);
+            } else if path.is_file() {
+                files.push(relative);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn run_command(program: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
@@ -1292,6 +1412,108 @@ mod tests {
         assert!(is_internal_artifact_path(".claude/settings.local.json"));
         assert!(is_internal_artifact_path(".subdispatch/result.json"));
         assert!(!is_internal_artifact_path("src/main.rs"));
+    }
+
+    #[test]
+    fn sensitive_status_lines_are_hidden_from_prompt_context() {
+        assert!(is_sensitive_status_line(" M .env"));
+        assert!(is_sensitive_status_line("?? config/token.txt"));
+        assert!(is_sensitive_status_line(" M secrets/api_key.txt"));
+        assert!(!is_sensitive_status_line(" M src/engine.rs"));
+    }
+
+    #[test]
+    fn run_status_is_completed_only_when_all_tasks_are_terminal() {
+        let tasks = vec![
+            json!({ "status": "completed" }),
+            json!({ "status": "failed" }),
+            json!({ "status": "missing" }),
+        ];
+        assert_eq!(run_status(&tasks), "completed");
+
+        let tasks = vec![
+            json!({ "status": "completed" }),
+            json!({ "status": "running" }),
+        ];
+        assert_eq!(run_status(&tasks), "running");
+    }
+
+    #[test]
+    fn status_directories_expand_to_files() {
+        let root = env::temp_dir().join(format!("subdispatch-test-{}", now_secs()));
+        let report_dir = root.join("docs").join("agent-reports");
+        fs::create_dir_all(&report_dir).unwrap();
+        fs::write(report_dir.join("report.md"), "hello").unwrap();
+        fs::create_dir_all(root.join(".subdispatch")).unwrap();
+        fs::write(root.join(".subdispatch").join("result.json"), "{}").unwrap();
+
+        let files = expand_status_path(&root, "docs/agent-reports/").unwrap();
+        assert_eq!(files, vec!["docs/agent-reports/report.md".to_string()]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_task_dirty_state_can_be_recovered_from_run_state() {
+        let root = env::temp_dir().join(format!("subdispatch-engine-test-{}", now_secs()));
+        let engine = SubDispatchEngine {
+            workspace: root.clone(),
+            runs_dir: root.join(".subdispatch").join("runs"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees"),
+            workers: BTreeMap::new(),
+        };
+        let run_id = "run_dirty";
+        let task_id = "task_dirty";
+        let run = RunState {
+            id: run_id.to_string(),
+            goal: "goal".to_string(),
+            base_ref: "HEAD".to_string(),
+            base_commit: "abc".to_string(),
+            workspace: root.display().to_string(),
+            created_at: now_secs(),
+            workspace_dirty: true,
+            workspace_dirty_summary: vec!["M src/engine.rs".to_string()],
+            tasks: vec![task_id.to_string()],
+        };
+        let task = TaskState {
+            id: task_id.to_string(),
+            run_id: run_id.to_string(),
+            goal: "goal".to_string(),
+            instruction: "task".to_string(),
+            worker: "minimax".to_string(),
+            status: STATUS_QUEUED.to_string(),
+            branch: "agent/run_dirty/task_dirty".to_string(),
+            worktree: root.join("worktree").display().to_string(),
+            base_commit: "abc".to_string(),
+            workspace_dirty: false,
+            workspace_dirty_summary: Vec::new(),
+            read_scope: Vec::new(),
+            write_scope: Vec::new(),
+            forbidden_paths: Vec::new(),
+            context: String::new(),
+            context_files: Vec::new(),
+            created_at: now_secs(),
+            pid: None,
+            exit_code: None,
+            error: None,
+            started_at: None,
+            finished_at: None,
+            exit_path: None,
+            hook_events_path: None,
+            hook_summary_path: None,
+            command: None,
+            warning: None,
+            worktree_removed: None,
+            worktree_deleted_at: None,
+        };
+        engine.write_run(&run).unwrap();
+        engine.write_task(&task).unwrap();
+
+        let recovered = engine.read_task(run_id, task_id).unwrap();
+        assert!(recovered.workspace_dirty);
+        assert_eq!(recovered.workspace_dirty_summary, vec!["M src/engine.rs"]);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

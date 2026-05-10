@@ -1,5 +1,6 @@
 mod config;
 mod engine;
+mod installer;
 mod mcp;
 mod web;
 
@@ -28,6 +29,20 @@ enum Command {
         workspace: PathBuf,
         #[arg(long)]
         overwrite: bool,
+    },
+    /// Install SubDispatch MCP config for this project or globally.
+    Install {
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        #[arg(long)]
+        project: bool,
+        #[arg(long)]
+        global: bool,
+    },
+    /// Diagnose local SubDispatch readiness.
+    Doctor {
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
     },
     /// List configured workers and available capacity.
     Workers {
@@ -111,6 +126,22 @@ fn run() -> Result<(), String> {
             overwrite,
         } => {
             print_json(&config::init_env(&workspace, overwrite)?)?;
+        }
+        Command::Install {
+            workspace,
+            project,
+            global,
+        } => {
+            let install_project = project || !global;
+            let install_global = global;
+            print_json(&installer::install(
+                &workspace,
+                install_project,
+                install_global,
+            )?)?;
+        }
+        Command::Doctor { workspace } => {
+            print_json(&installer::doctor(&workspace)?)?;
         }
         Command::Workers { workspace } => {
             let engine = SubDispatchEngine::new(workspace)?;

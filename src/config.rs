@@ -202,9 +202,15 @@ fn parse_usize(
     default: usize,
 ) -> Result<usize, String> {
     match settings.get(key) {
-        Some(value) => value
-            .parse::<usize>()
-            .map_err(|err| format!("{key} must be a positive integer: {err}")),
+        Some(value) => {
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|err| format!("{key} must be a positive integer: {err}"))?;
+            if parsed == 0 {
+                return Err(format!("{key} must be greater than 0"));
+            }
+            Ok(parsed)
+        }
         None => Ok(default),
     }
 }
@@ -357,5 +363,16 @@ mod tests {
         let worker = workers.get("glm").unwrap();
         assert_eq!(worker.max_concurrency, 2);
         assert_eq!(worker.env.get("ANTHROPIC_API_KEY").unwrap(), "secret");
+    }
+
+    #[test]
+    fn max_concurrency_must_be_positive() {
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "SUBDISPATCH_WORKER_GLM_MAX_CONCURRENCY".to_string(),
+            "0".to_string(),
+        );
+        let err = worker_from_env("glm", &settings).unwrap_err();
+        assert!(err.contains("must be greater than 0"));
     }
 }

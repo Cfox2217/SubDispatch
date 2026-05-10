@@ -76,6 +76,12 @@ SubDispatch creates a branch and worktree, writes a task prompt, and starts the
 configured worker when capacity is available. Tasks over the worker concurrency
 limit stay queued.
 
+If the primary workspace has uncommitted changes, SubDispatch records a
+redacted `git status --short` summary on the run and every task, and injects
+that summary into the child prompt. Child worktrees are still created from the
+recorded base commit; dirty primary-workspace content is not copied unless the
+primary agent explicitly supplies it through `context` or `context_files`.
+
 ### `poll_run`
 
 Returns factual task status for a run. Polling refreshes process state and
@@ -86,6 +92,7 @@ spend a long time planning before stdout, stderr, or git diff changes. The
 primary agent should not infer failure from silence. SubDispatch reports:
 
 - runtime seconds
+- idle seconds for running tasks, measured since the latest hook event or task start
 - changed file count
 - hook event count
 - last hook event name

@@ -165,3 +165,22 @@ The Web UI is intentionally not a task console. It provides Setup checks,
 `.env` initialization, worker capacity, run/task status, changed-file counts,
 and Claude hook activity. The primary LLM still creates tasks through MCP or
 CLI.
+
+## Install And Release
+
+Install MCP config for the current project:
+
+```bash
+subdispatch install --project --workspace .
+subdispatch doctor --workspace .
+```
+
+Create a local release archive:
+
+```bash
+scripts/release.sh
+```
+
+See [docs/rust-release.md](docs/rust-release.md) for packaging details and
+[docs/python-removal-plan.md](docs/python-removal-plan.md) for the Python MVP
+retirement plan.
