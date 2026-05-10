@@ -1,12 +1,15 @@
-# CodexSaver — Spec Document
+# SubDispatch — Spec Document
 
 ## 1. Concept & Vision
 
-**CodexSaver** is a cost-aware AI coding router delivered as an MCP (Model Context Protocol) server. Codex calls it as a tool (`codexsaver.delegate_task`) rather than spawning a subprocess. This keeps Codex's心智模型 clean: CodexSaver is not another agent — it is Codex's cost-saving tool.
+**SubDispatch** is a local scaffold for a primary LLM to run child coding agents
+in parallel. The primary LLM owns planning, review, merge decisions, and conflict
+resolution. SubDispatch only provides isolated execution, status polling,
+artifact collection, and worktree cleanup.
 
-The philosophy: _don't replace Codex, shrink it_. Let cheap models do the work; let expensive models do the thinking.
+The philosophy: _let the primary agent think; let SubDispatch handle execution._
 
-**Slogan:** _Make Codex cheaper without making it dumber._
+**Tagline:** _Parallel child agents, isolated worktrees._
 
 ---
 
@@ -14,340 +17,279 @@ The philosophy: _don't replace Codex, shrink it_. Let cheap models do the work; 
 
 ### Visual Identity
 
-- **Name:** CodexSaver
-- **Tagline:** Make Codex cheaper without making it dumber.
+- **Name:** SubDispatch
+- **Tagline:** Parallel child agents, isolated worktrees.
 - **Primary palette:** terminal-native, monospace-first, minimal chrome
 - **Font:** system monospace
-- **No external UI** — MCP tool; all feedback is structured JSON
+- **No external UI** — MCP tool and CLI; all feedback is structured JSON
 
-### Log Output Aesthetic (for Codex operators)
+### Log Output Aesthetic
 
 ```
-[CodexSaver] Delegating low-risk task to DeepSeek (score=2)
-[DeepSeek] Generated 6 tests in 3.2s
-[Verifier] Tests passed
-[CodexSaver] Returning patch to Codex — estimated 62% token savings
+[SubDispatch] Starting run abc123 with 4 tasks
+[SubDispatch] Task t1 queued, worker claude-code available
+[SubDispatch] Task t2 started in worktree /tmp/subdispatch/run-abc123/t2
+[claude-code] Task t2 completed in 23s
+[SubDispatch] Task t2 completed, collecting artifacts
+[SubDispatch] Run abc123: 4 completed, 0 failed
 ```
 
 ### README Tone
 
-Engineer-first: no fluff, numbers first, demo immediately visible.
+Engineer-first: no fluff, concise structure, interface-focused.
 
 ---
 
 ## 3. Architecture
 
 ```
-User
+Primary LLM (Codex / Claude Code)
   ↓
-Codex (Primary Agent / Brain)
-  ↓ MCP tool call: codexsaver.delegate_task
-CodexSaver MCP Server
-  ├─ Task Classifier     (rule-based: delegate or keep)
-  ├─ Risk Scorer        (file_risk + task_risk + diff_size + test_confidence)
-  ├─ Context Packer     (prune workspace context)
-  ├─ Task Runner        (DeepSeek API via openai-compatible client)
-  ├─ Verifier           (run tests, lint, parse diff)
-  └─ Fallback Engine    (on failure → return needs_codex)
+SubDispatch MCP Server / CLI
+  ├─ list_workers    (capacity + availability)
+  ├─ start_run       (create tasks, dispatch workers)
+  ├─ poll_run        (refresh status, start queued)
+  ├─ collect_task    (git diff, artifact collection)
+  └─ delete_worktree (cleanup, preserve artifacts)
   ↓
-DeepSeek API
+Claude Code (default worker)
   ↓
-CodexSaver Result
-  ↓
-Codex (reviews patch, applies, finalizes)
+Isolated Git Worktrees
 ```
 
 ### MCP Integration
 
-Codex discovers CodexSaver via `~/.codex/config.toml` or project-level `.codex/config.toml`:
+SubDispatch registers as an MCP server via project-level `.codex/config.toml`:
 
 ```toml
-[mcp_servers.codexsaver]
+[mcp_servers.subdispatch]
 command = "python"
-args = ["codexsaver_mcp.py"]
+args = ["subdispatch_mcp.py"]
 startup_timeout_sec = 10
 tool_timeout_sec = 120
 ```
 
 ### Data Flow
 
-1. **MCP Input** (tool call from Codex):
+1. **MCP Input** (tool call from primary):
    ```json
    {
-     "instruction": "Add unit tests for user service",
-     "files": ["src/user/service.ts"],
-     "constraints": ["Do not modify production logic", "Return patch only"]
+     "tasks": [
+       {"task_id": "t1", "instruction": "Add unit tests for user service", "branch": "feat/t1"},
+       {"task_id": "t2", "instruction": "Update README", "branch": "feat/t2"}
+     ],
+     "base_commit": "abc123"
    }
    ```
 
 2. **MCP Output** (tool response):
    ```json
    {
-     "status": "success",
-     "route": "deepseek",
-     "summary": "Generated 6 unit tests",
-     "changed_files": ["tests/user/service.test.ts"],
-     "patch": "git diff output",
-     "commands_to_run": ["npm test -- user"],
-     "risk_notes": [],
-     "estimated_savings_percent": 62
+     "run_id": "run-xyz",
+     "tasks": [
+       {"task_id": "t1", "status": "queued"},
+       {"task_id": "t2", "status": "running", "worktree": "/tmp/subdispatch/run-xyz/t2"}
+     ]
    }
    ```
 
-3. **Fallback Response** (when Codex must take over):
+3. **poll_run** response:
    ```json
    {
-     "status": "needs_codex",
-     "summary": "Task involves auth logic — too high risk to delegate",
-     "risk_notes": ["forbidden path: auth/*"],
-     "suggested_action": "Codex handles this"
+     "run_id": "run-xyz",
+     "status": "completed",
+     "tasks": [
+       {"task_id": "t1", "status": "completed", "artifacts": "..."},
+       {"task_id": "t2", "status": "failed", "reason": "..."}
+     ]
    }
    ```
 
 ---
 
-## 4. Task Routing Strategy
+## 4. Entities
 
-### Rule-Based Classification
+### Worker
 
-**Delegate to DeepSeek** (low-risk, high-volume):
+- `id`: unique worker identifier
+- `command`: runner command template
+- `model`: configured model (optional)
+- `max_concurrency`: slot limit
+- `running`: current running count
+- `queued`: pending count
+- `available_slots`: max_concurrency - running
+- `status`: `available` | `busy` | `disabled`
 
-```yaml
-- summarize repository
-- locate files
-- explain code
-- write tests for existing function
-- update docs
-- simple refactor under 5 files
-- fix lint/type errors
-- generate migration draft
-```
+### Run
 
-**Keep in Codex** (high-risk, complex judgment):
+- `run_id`: unique run identifier
+- `base_commit`: shared base commit for all tasks
+- `tasks`: list of task records
+- `status`: `running` | `completed` | `failed` | `cancelled`
 
-```yaml
-- architecture decision
-- security-sensitive change
-- auth/payment/permission logic
-- database migration with data loss risk
-- ambiguous product requirement
-- final review before commit
-- failed DeepSeek attempt
-```
+### Task
 
-### Risk Scoring
-
-```
-risk = file_risk + task_risk + diff_size + test_confidence
-```
-
-| Score  | Action                                  |
-|--------|-----------------------------------------|
-| ≤ 3    | DeepSeek executes directly              |
-| 4–6    | DeepSeek executes, Codex validates       |
-| ≥ 7    | Codex handles it                        |
-
-**High-risk file paths** (never delegated directly):
-```
-auth/*
-security/*
-billing/*
-payments/*
-migrations/*
-infra/*
-.github/workflows/*
-```
+- `task_id`: unique task identifier within a run
+- `branch`: dedicated git branch
+- `worktree`: isolated git worktree path
+- `status`: `queued` | `running` | `completed` | `failed` | `cancelled` | `missing`
+- `instruction`: original prompt
+- `result_manifest_path`: worker output path
+- `artifact_dir`: collected artifacts directory
+- `pid`: worker process id
+- `logs`: stdout/stderr tails
+- `context`: optional primary-agent supplied inline context
+- `context_files`: optional primary-worktree files to embed into the prompt
 
 ---
 
-## 5. Core Components
+## 5. Interfaces
 
-### 5.1 Task Classifier
+### `list_workers`
 
-Reads task description and workspace, outputs a routing decision with risk score. Uses keyword matching + path scanning.
-
-### 5.2 Context Packer
-
-Prunes workspace context to fit within the configured worker model's context window. Removes boilerplate, node_modules, build artifacts. Outputs a focused prompt with file references.
-
-### 5.3 Worker Provider Client
-
-Calls the configured worker provider through an OpenAI-compatible Chat Completions API. DeepSeek remains the default provider, and custom providers can be configured with a base URL and model.
-
-### 5.4 Verifier
-
-After the worker provider completes:
-1. Parse changed files from diff
-2. Check forbidden paths were not touched
-3. Run project test suite (`npm test`, `pytest`, etc.)
-4. Run linter if available
-5. Produce final status + diff
-
-### 5.5 Fallback Engine
-
-If any of these occur, CodexSaver returns `needs_codex`:
-- Test failures
-- Diff touches forbidden paths
-- DeepSeek API error or timeout
-- Risk score ≥ 7
-
----
-
-## 6. MCP Tool Interface
-
-### Tool Name
-
-```
-codexsaver.delegate_task
-```
-
-### Input Schema
+Returns worker capacity and availability:
 
 ```json
 {
-  "instruction": "string (required)",
-  "files": "string[] (optional, files to focus on)",
-  "constraints": "string[] (optional, instructions for DeepSeek)",
-  "workspace": "string (optional, defaults to cwd)"
+  "workers": [
+    {
+      "id": "claude-code",
+      "command": "claude -p $prompt ...",
+      "model": "claude-sonnet-4-5",
+      "max_concurrency": 2,
+      "running": 1,
+      "queued": 0,
+      "available_slots": 1,
+      "status": "available"
+    }
+  ]
 }
 ```
 
-### Output Schema
+### `start_run`
+
+Creates tasks, branches, worktrees, and dispatches workers:
 
 ```json
 {
-  "status": "success | failed | needs_codex",
-  "route": "deepseek | codex",
-  "summary": "string",
-  "changed_files": "string[]",
-  "patch": "string",
-  "commands_to_run": "string[]",
-  "risk_notes": "string[]",
-  "estimated_savings_percent": "number"
+  "run_id": "run-xyz",
+  "tasks": [
+    {"task_id": "t1", "status": "queued"},
+    {"task_id": "t2", "status": "running", "worktree": "/tmp/subdispatch/run-xyz/t2"}
+  ]
+}
+```
+
+### `poll_run`
+
+Refreshes task status and starts queued tasks:
+
+```json
+{
+  "run_id": "run-xyz",
+  "status": "completed",
+  "tasks": [
+    {"task_id": "t1", "status": "completed", "artifacts": "/tmp/subdispatch/run-xyz/t1"},
+    {"task_id": "t2", "status": "failed", "reason": "non-zero exit"}
+  ]
+}
+```
+
+### `collect_task`
+
+Returns Git-based artifact for one task:
+
+```json
+{
+  "task_id": "t1",
+  "instruction": "Add unit tests",
+  "status": "completed",
+  "base_commit": "abc123",
+  "branch": "feat/t1",
+  "changed_files": ["src/user/service.ts", "tests/user/service.test.ts"],
+  "diff": "...",
+  "patch_path": "/tmp/subdispatch/run-xyz/t1/patch.diff",
+  "worker_manifest": {"files": ["tests/user/service.test.ts"]},
+  "stdout_tail": "...",
+  "stderr_tail": "..."
+}
+```
+
+### `delete_worktree`
+
+Deletes a task worktree:
+
+```json
+{
+  "task_id": "t1",
+  "deleted": true,
+  "preserved_branch": true,
+  "preserved_artifacts": true
 }
 ```
 
 ---
 
-## 7. Codex Policy (AGENTS.md)
+## 6. Hard Constraints
 
-```markdown
-# CodexSaver Policy
+1. Child agents never run in the primary worktree.
+2. Every task has its own branch.
+3. Every task has its own worktree.
+4. Every task records a base commit.
+5. `collect_task` uses Git as the source of truth.
+6. Worktree deletion verifies the target is under the SubDispatch worktree root.
+7. Artifacts are preserved by default.
+8. Worker concurrency limits are enforced.
 
-You have access to a tool named `codexsaver.delegate_task`.
+---
 
-## When to Use CodexSaver
+## 7. Configuration
 
-Use CodexSaver for:
-- repo scanning
-- code explanation
-- writing tests
-- simple refactors
-- lint/type fixes
-- documentation updates
-- boilerplate generation
+SubDispatch reads from `.env` in the workspace root:
 
-Do NOT use CodexSaver for:
-- architecture decisions
-- auth/security/payment logic
-- database migrations
-- ambiguous requirements
-- final review
-
-## Workflow
-
-1. If task is low-risk, call `codexsaver.delegate_task`.
-2. Review the returned patch carefully.
-3. Run or recommend tests.
-4. Apply only if safe.
-5. If CodexSaver returns `needs_codex`, take over yourself.
-```
+| Variable | Description |
+|---|---|
+| `SUBDISPATCH_WORKER_MODE` | `trusted-worktree` (MVP only) |
+| `SUBDISPATCH_CLAUDE_ENABLED` | Enable claude-code worker |
+| `SUBDISPATCH_CLAUDE_PERMISSION_MODE` | `bypassPermissions` (MVP default) |
+| `SUBDISPATCH_CLAUDE_COMMAND` | Worker command template |
+| `SUBDISPATCH_CLAUDE_MODEL` | Optional model override |
+| `SUBDISPATCH_CLAUDE_MAX_CONCURRENCY` | Max parallel tasks |
+| `ANTHROPIC_API_KEY` | Optional API key |
+| `ANTHROPIC_BASE_URL` | Optional base URL |
 
 ---
 
 ## 8. File Structure
 
 ```
-codexsaver/
+subdispatch/
 ├── SPEC.md
 ├── README.md
-├── codexsaver_mcp.py        # MCP server entry point
-├── codexsaver/
+├── README_zh.md
+├── docs/
+│   └── subdispatch-mvp.md
+├── subdispatch/
 │   ├── __init__.py
-│   ├── router.py            # Task classification + risk scoring
-│   ├── packer.py            # Context pruning
-│   ├── deepseek_client.py   # DeepSeek API client
-│   ├── verifier.py          # Diff + test verification
-│   ├── fallback.py          # Escalation logic
-│   └── models.py           # Task/Result dataclasses
-├── .codex/
-│   └── config.toml          # Codex MCP configuration
-├── AGENTS.md                # Codex policy
-└── tests/
-    └── ...
+│   ├── models.py
+│   ├── runner.py
+│   ├── worktree.py
+│   └── cli.py
+├── subdispatch_mcp.py
+├── .env.example
+└── AGENTS.md
 ```
 
 ---
 
-## 9. Success Metrics
+## 9. Out of Scope (MVP)
 
-| Metric                              | Target                      |
-|-------------------------------------|-----------------------------|
-| Codex token cost reduction           | 40–70%                      |
-| Task success rate delta              | < 3% degradation            |
-| Average completion time delta        | < 20% increase              |
-| DeepSeek output re-do rate by Codex  | < 25%                       |
-| Test pass rate                       | ≥ current Codex-only baseline |
-| High-risk file DeepSeek direct edits | 0                           |
-
----
-
-## 10. Design Principles
-
-1. **DeepSeek can write, Codex must validate.** The split is by _verification difficulty_, not by _task type alone_.
-2. **Fail fast and escalate.** One DeepSeek failure → escalate to Codex. Never burn tokens on retry loops.
-3. **Zero friction for Codex.** CodexSaver is an MCP tool — no shell spawning, no stdio pipe parsing.
-4. **Observable.** Every step logs its decision so operators can audit routing behavior.
-5. **Token savings first.** Every feature is justified by cost reduction or quality maintenance.
-6. **CodexSaver never touches code directly.** It returns a patch; Codex applies it.
-
----
-
-## 11. Out of Scope (MVP)
-
-- CLI wrapper (deprecated — MCP is primary)
 - Learning-based routing
 - Web dashboard
 - Multi-workspace support
-- worker session resume
+- Worker session resume
+- Non-git isolation
 
 ---
 
-## 12. Environment Variables
-
-| Variable           | Description                  | Required |
-|--------------------|------------------------------|----------|
-| `CODEXSAVER_PROVIDER` | Worker provider name (`deepseek` by default) | No |
-| `CODEXSAVER_API_KEY` | Generic worker provider API key | Yes for live delegation |
-| `CODEXSAVER_BASE_URL` | Generic OpenAI-compatible chat completions URL | Required for custom providers |
-| `CODEXSAVER_MODEL` | Generic worker model override | Required for custom providers |
-| `DEEPSEEK_API_KEY` | Backward-compatible DeepSeek API key | No |
-
----
-
-## 13. Install Behavior
-
-`python cli.py install` writes a global Codex MCP server entry to
-`~/.codex/config.toml` by default. The entry points to a stable launcher at
-`~/.codexsaver/codexsaver_mcp.py`, so every Codex workspace can use the same
-CodexSaver server without adding per-project config.
-
-Use `python cli.py install --project` only when a repository-local
-`.codex/config.toml` is preferred.
-
-Provider credentials are persisted separately in `~/.codexsaver/config.json`,
-with file permissions restricted to the local user.
-
----
-
-_This spec was designed collaboratively and approved before implementation._
+_This spec defines the SubDispatch MVP._

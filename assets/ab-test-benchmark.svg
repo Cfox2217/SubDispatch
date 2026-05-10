@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="980" height="420" viewBox="0 0 980 420" role="img" aria-labelledby="title desc">
-  <title id="title">CodexSaver A/B benchmark</title>
-  <desc id="desc">Normalized cost comparison for five representative small development tasks. Baseline Codex-only cost is 100 for each task. CodexSaver cost indices are 55, 55, 55, 55, and 38.</desc>
+  <title id="title">SubDispatch A/B benchmark</title>
+  <desc id="desc">Normalized cost comparison for five representative small development tasks. Baseline primary-agent-only cost is 100 for each task. SubDispatch cost indices are 55, 55, 55, 55, and 38.</desc>
   <style>
     .bg { fill: #f7f5ef; }
     .title { font: 700 24px monospace; fill: #1e2a21; }
@@ -10,12 +10,12 @@
     .label { font: 12px monospace; fill: #2d3b31; }
     .small { font: 11px monospace; fill: #516357; }
     .baseline { fill: #cfd7d0; }
-    .codexsaver { fill: #2f9e44; }
+    .subdispatch { fill: #2f9e44; }
     .legend { font: 12px monospace; fill: #233127; }
   </style>
   <rect class="bg" x="0" y="0" width="980" height="420" rx="18"/>
-  <text class="title" x="40" y="42">Codex-only vs CodexSaver (Normalized Cost Index)</text>
-  <text class="subtitle" x="40" y="66">A = Codex-only baseline fixed at 100. B = CodexSaver cost index after live runs. Lower is better.</text>
+  <text class="title" x="40" y="42">Primary-agent-only vs SubDispatch (Normalized Cost Index)</text>
+  <text class="subtitle" x="40" y="66">A = primary-agent-only baseline fixed at 100. B = SubDispatch cost index after live runs. Lower is better.</text>
 
   <line class="axis" x1="80" y1="320" x2="930" y2="320"/>
   <line class="axis" x1="80" y1="100" x2="80" y2="320"/>
@@ -32,35 +32,35 @@
   <text class="small" x="30" y="104">100</text>
 
   <rect class="baseline" x="120" y="100" width="52" height="220" rx="6"/>
-  <rect class="codexsaver" x="176" y="199" width="52" height="121" rx="6"/>
+  <rect class="subdispatch" x="176" y="199" width="52" height="121" rx="6"/>
   <text class="label" x="125" y="342">Explain</text>
   <text class="small" x="122" y="358">router</text>
   <text class="small" x="130" y="92">100</text>
   <text class="small" x="190" y="191">55</text>
 
   <rect class="baseline" x="280" y="100" width="52" height="220" rx="6"/>
-  <rect class="codexsaver" x="336" y="199" width="52" height="121" rx="6"/>
+  <rect class="subdispatch" x="336" y="199" width="52" height="121" rx="6"/>
   <text class="label" x="286" y="342">Doc</text>
   <text class="small" x="274" y="358">router</text>
   <text class="small" x="290" y="92">100</text>
   <text class="small" x="350" y="191">55</text>
 
   <rect class="baseline" x="440" y="100" width="52" height="220" rx="6"/>
-  <rect class="codexsaver" x="496" y="199" width="52" height="121" rx="6"/>
+  <rect class="subdispatch" x="496" y="199" width="52" height="121" rx="6"/>
   <text class="label" x="446" y="342">Add cost</text>
   <text class="small" x="456" y="358">tests</text>
   <text class="small" x="450" y="92">100</text>
   <text class="small" x="510" y="191">55</text>
 
   <rect class="baseline" x="600" y="100" width="52" height="220" rx="6"/>
-  <rect class="codexsaver" x="656" y="199" width="52" height="121" rx="6"/>
+  <rect class="subdispatch" x="656" y="199" width="52" height="121" rx="6"/>
   <text class="label" x="603" y="342">Explain</text>
   <text class="small" x="603" y="358">verifier</text>
   <text class="small" x="610" y="92">100</text>
   <text class="small" x="670" y="191">55</text>
 
   <rect class="baseline" x="760" y="100" width="52" height="220" rx="6"/>
-  <rect class="codexsaver" x="816" y="236" width="52" height="84" rx="6"/>
+  <rect class="subdispatch" x="816" y="236" width="52" height="84" rx="6"/>
   <text class="label" x="756" y="342">Update</text>
   <text class="small" x="762" y="358">install docs</text>
   <text class="small" x="770" y="92">100</text>
@@ -68,8 +68,8 @@
 
   <rect class="baseline" x="80" y="30" width="14" height="14" rx="3"/>
   <text class="legend" x="102" y="42">Codex-only baseline</text>
-  <rect class="codexsaver" x="250" y="30" width="14" height="14" rx="3"/>
-  <text class="legend" x="272" y="42">CodexSaver mode</text>
+  <rect class="subdispatch" x="250" y="30" width="14" height="14" rx="3"/>
+  <text class="legend" x="272" y="42">SubDispatch mode</text>
 
-  <text class="subtitle" x="40" y="392">Aggregate: average CodexSaver cost index = 0.52, estimated relative reduction = 48.0%, average latency = 6.18s.</text>
+  <text class="subtitle" x="40" y="392">Aggregate: average SubDispatch cost index = 0.52, estimated relative reduction = 48.0%, average latency = 6.18s.</text>
 </svg>

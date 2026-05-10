@@ -11,6 +11,7 @@ artifact collection, and worktree cleanup.
 - Automatic review
 - Automatic merge or cherry-pick
 - Conflict resolution
+- Product renaming
 - Multi-provider abstraction
 
 ## Core model
@@ -23,7 +24,7 @@ SubDispatch tracks three entities:
 - `Task`: one child-agent execution in its own branch and git worktree.
 
 Each task records its base commit, branch, worktree path, process id, logs,
-result manifest path, and artifact directory.
+result manifest path, Claude hook/session evidence, and artifact directory.
 
 ## Configuration
 
@@ -75,15 +76,24 @@ SubDispatch creates a branch and worktree, writes a task prompt, and starts the
 configured worker when capacity is available. Tasks over the worker concurrency
 limit stay queued.
 
-Tasks may include optional `context` or `context_files` supplied by the primary
-agent. This is the right way to give a child agent uncommitted diffs, temporary
-audit notes, or other context that is not present in the child worktree's base
-commit.
-
 ### `poll_run`
 
 Returns factual task status for a run. Polling refreshes process state and
 starts queued tasks when worker slots open.
+
+`poll_run` is also the primary observability surface. A running child agent may
+spend a long time planning before stdout, stderr, or git diff changes. The
+primary agent should not infer failure from silence. SubDispatch reports:
+
+- runtime seconds
+- changed file count
+- hook event count
+- last hook event name
+- last hook event timestamp
+- transcript path
+- agent transcript path
+- last tool name
+- last assistant message tail
 
 Task statuses are:
 
@@ -104,6 +114,9 @@ The returned artifact includes:
 
 - original instruction
 - worker manifest, if present
+- Claude hook summary
+- Claude hook event tail
+- Claude transcript tail, when available
 - stdout/stderr tails
 - changed files
 - diff
@@ -128,3 +141,5 @@ task unless forced. By default it preserves the branch and artifact directory.
 - Worktree deletion verifies the target is under the SubDispatch worktree root.
 - Artifacts are preserved by default.
 - Worker concurrency limits are enforced.
+- Process state, hook events, session transcript, and Git artifacts are separate
+  signals. The primary agent decides whether to wait, collect, or clean up.

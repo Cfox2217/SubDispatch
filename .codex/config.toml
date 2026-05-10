@@ -1,5 +1,5 @@
-[mcp_servers.codexsaver]
+[mcp_servers.subdispatch]
 command = "python"
-args = ["./codexsaver_mcp.py"]
+args = ["./subdispatch_mcp.py"]
 startup_timeout_sec = 10
 tool_timeout_sec = 120

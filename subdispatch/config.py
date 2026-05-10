@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-CONFIG_DIR = Path.home() / ".codexsaver"
+CONFIG_DIR = Path.home() / ".subdispatch"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 
@@ -188,8 +188,6 @@ def save_provider_config(
         provider_config["model"] = model
     if base_url is not None:
         provider_config["base_url"] = base_url
-    if provider_name == "deepseek" and api_key is not None:
-        config["deepseek_api_key"] = api_key
     path = save_config(config, config_path)
     preset = PROVIDER_PRESETS.get(provider_name)
     return {
@@ -211,9 +209,9 @@ def save_api_key(api_key: str, config_path: str | None = None,
 def resolve_provider_name(explicit_provider: str | None = None) -> tuple[str, str]:
     if explicit_provider:
         return normalize_provider(explicit_provider), "argument"
-    env_provider = os.environ.get("CODEXSAVER_PROVIDER")
+    env_provider = os.environ.get("SUBDISPATCH_PROVIDER")
     if env_provider:
-        return normalize_provider(env_provider), "environment"
+        return normalize_provider(env_provider), "environment:SUBDISPATCH_PROVIDER"
     config_provider = load_config().get("provider")
     if config_provider:
         return normalize_provider(config_provider), "local_config"
@@ -230,9 +228,9 @@ def resolve_api_key(explicit_api_key: str | None = None,
     if explicit_api_key:
         return explicit_api_key, "argument"
     provider_name, _ = resolve_provider_name(provider)
-    generic_env_key = os.environ.get("CODEXSAVER_API_KEY")
+    generic_env_key = os.environ.get("SUBDISPATCH_API_KEY")
     if generic_env_key:
-        return generic_env_key, "environment:CODEXSAVER_API_KEY"
+        return generic_env_key, "environment:SUBDISPATCH_API_KEY"
     preset = PROVIDER_PRESETS.get(provider_name)
     api_key_env, _, _ = provider_specific_env_names(provider_name)
     for env_name in (api_key_env, *(preset.env_keys if preset else ())):
@@ -245,9 +243,6 @@ def resolve_api_key(explicit_api_key: str | None = None,
     )
     if config_api_key:
         return config_api_key, f"local_config:{provider_name}"
-    config_api_key = config.get("deepseek_api_key") if provider_name == "deepseek" else None
-    if config_api_key:
-        return config_api_key, "local_config:legacy_deepseek"
     return None, None
 
 
@@ -267,8 +262,8 @@ def resolve_provider_config(
 
     if base_url:
         resolved_base_url, base_url_source = base_url, "argument"
-    elif os.environ.get("CODEXSAVER_BASE_URL"):
-        resolved_base_url, base_url_source = os.environ["CODEXSAVER_BASE_URL"], "environment:CODEXSAVER_BASE_URL"
+    elif os.environ.get("SUBDISPATCH_BASE_URL"):
+        resolved_base_url, base_url_source = os.environ["SUBDISPATCH_BASE_URL"], "environment:SUBDISPATCH_BASE_URL"
     elif os.environ.get(base_url_env):
         resolved_base_url, base_url_source = os.environ[base_url_env], f"environment:{base_url_env}"
     elif configured_provider.get("base_url"):
@@ -280,8 +275,8 @@ def resolve_provider_config(
 
     if model:
         resolved_model, model_source = model, "argument"
-    elif os.environ.get("CODEXSAVER_MODEL"):
-        resolved_model, model_source = os.environ["CODEXSAVER_MODEL"], "environment:CODEXSAVER_MODEL"
+    elif os.environ.get("SUBDISPATCH_MODEL"):
+        resolved_model, model_source = os.environ["SUBDISPATCH_MODEL"], "environment:SUBDISPATCH_MODEL"
     elif os.environ.get(model_env):
         resolved_model, model_source = os.environ[model_env], f"environment:{model_env}"
     elif configured_provider.get("model"):

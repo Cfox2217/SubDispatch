@@ -5,14 +5,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from codexsaver.provider import ProviderClient, ProviderError
-from codexsaver.schema import WorkerTask
+from subdispatch.provider import ProviderClient, ProviderError
+from subdispatch.schema import WorkerTask
 
 
 def test_provider_client_posts_chat_completion(monkeypatch):
-    monkeypatch.setenv("CODEXSAVER_PROVIDER", "openai")
-    monkeypatch.setenv("CODEXSAVER_API_KEY", "sk-test")
-    monkeypatch.setenv("CODEXSAVER_MODEL", "gpt-test")
+    monkeypatch.setenv("SUBDISPATCH_PROVIDER", "openai")
+    monkeypatch.setenv("SUBDISPATCH_API_KEY", "sk-test")
+    monkeypatch.setenv("SUBDISPATCH_MODEL", "gpt-test")
     response = MagicMock()
     response.read.return_value = json.dumps({
         "choices": [{
@@ -51,7 +51,7 @@ def test_provider_client_posts_chat_completion(monkeypatch):
 
 
 def test_provider_client_posts_anthropic_messages(monkeypatch):
-    monkeypatch.setenv("CODEXSAVER_PROVIDER", "anthropic")
+    monkeypatch.setenv("SUBDISPATCH_PROVIDER", "anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     response = MagicMock()
     response.read.return_value = json.dumps({
@@ -91,24 +91,24 @@ def test_provider_client_posts_anthropic_messages(monkeypatch):
 
 
 def test_provider_client_allows_local_provider_without_api_key(monkeypatch):
-    monkeypatch.setenv("CODEXSAVER_PROVIDER", "ollama")
-    monkeypatch.delenv("CODEXSAVER_API_KEY", raising=False)
+    monkeypatch.setenv("SUBDISPATCH_PROVIDER", "ollama")
+    monkeypatch.delenv("SUBDISPATCH_API_KEY", raising=False)
     client = ProviderClient()
     assert client.provider_name == "ollama"
 
 
 def test_provider_client_requires_base_url_for_unknown_provider(monkeypatch):
-    monkeypatch.setenv("CODEXSAVER_PROVIDER", "custom")
-    monkeypatch.setenv("CODEXSAVER_API_KEY", "sk-test")
-    monkeypatch.delenv("CODEXSAVER_BASE_URL", raising=False)
+    monkeypatch.setenv("SUBDISPATCH_PROVIDER", "custom")
+    monkeypatch.setenv("SUBDISPATCH_API_KEY", "sk-test")
+    monkeypatch.delenv("SUBDISPATCH_BASE_URL", raising=False)
     with pytest.raises(ProviderError, match="Missing base URL"):
         ProviderClient()
 
 
 def test_provider_client_requires_model_for_unknown_provider(monkeypatch):
-    monkeypatch.setenv("CODEXSAVER_PROVIDER", "custom")
-    monkeypatch.setenv("CODEXSAVER_API_KEY", "sk-test")
-    monkeypatch.setenv("CODEXSAVER_BASE_URL", "https://llm.example.test/v1/chat/completions")
-    monkeypatch.delenv("CODEXSAVER_MODEL", raising=False)
+    monkeypatch.setenv("SUBDISPATCH_PROVIDER", "custom")
+    monkeypatch.setenv("SUBDISPATCH_API_KEY", "sk-test")
+    monkeypatch.setenv("SUBDISPATCH_BASE_URL", "https://llm.example.test/v1/chat/completions")
+    monkeypatch.delenv("SUBDISPATCH_MODEL", raising=False)
     with pytest.raises(ProviderError, match="Missing model"):
         ProviderClient()

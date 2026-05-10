@@ -14,7 +14,7 @@ class ProviderError(RuntimeError):
 
 
 SYSTEM_PROMPT = """
-You are CodexSaver's low-cost coding worker.
+You are SubDispatch's delegated coding worker.
 
 You are NOT the final authority. Codex will review your output.
 
@@ -60,7 +60,7 @@ class ProviderClient:
             raise ProviderError(
                 "Missing worker API key. Run "
                 "`python cli.py auth set --provider PROVIDER --api-key ...` "
-                "or set CODEXSAVER_API_KEY / provider-specific API key env vars."
+                "or set SUBDISPATCH_API_KEY / provider-specific API key env vars."
             )
         if not self.config.base_url:
             raise ProviderError(

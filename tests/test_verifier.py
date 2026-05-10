@@ -5,8 +5,8 @@ import sys
 import tempfile
 
 import pytest
-from codexsaver.verifier import Verifier, REQUIRED_KEYS, VALID_STATUS
-from codexsaver.schema import RouteDecision
+from subdispatch.verifier import Verifier, REQUIRED_KEYS, VALID_STATUS
+from subdispatch.schema import RouteDecision
 
 
 class TestVerifier:

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from cli import main
-from codexsaver.installer import (
+from subdispatch.installer import (
     doctor,
     install_config,
     install_global_config,
@@ -14,28 +14,29 @@ from codexsaver.installer import (
 
 
 def test_render_mcp_config():
-    text = render_mcp_config("./codexsaver_mcp.py")
-    assert '[mcp_servers.codexsaver]' in text
-    assert 'args = ["./codexsaver_mcp.py"]' in text
+    text = render_mcp_config("./subdispatch_mcp.py")
+    assert '[mcp_servers.subdispatch]' in text
+    assert 'args = ["./subdispatch_mcp.py"]' in text
 
 
 def test_install_config_creates_file(tmp_path):
     config_path = tmp_path / ".codex" / "config.toml"
-    result = install_config(str(config_path), "./codexsaver_mcp.py")
+    result = install_config(str(config_path), "./subdispatch_mcp.py")
     assert result["changed"] is True
     assert config_path.exists()
-    assert "codexsaver" in config_path.read_text(encoding="utf-8")
+    assert "subdispatch" in config_path.read_text(encoding="utf-8")
 
 
-def test_install_config_replaces_existing_section(tmp_path):
+def test_install_config_replaces_existing_subdispatch_section(tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        "[mcp_servers.codexsaver]\ncommand = \"python\"\nargs = [\"old.py\"]\n\n[other]\nvalue = 1\n",
+        "[mcp_servers.subdispatch]\ncommand = \"python\"\nargs = [\"old.py\"]\n\n[other]\nvalue = 1\n",
         encoding="utf-8",
     )
-    install_config(str(config_path), "./codexsaver_mcp.py")
+    install_config(str(config_path), "./subdispatch_mcp.py")
     text = config_path.read_text(encoding="utf-8")
-    assert 'args = ["./codexsaver_mcp.py"]' in text
+    assert "[mcp_servers.subdispatch]" in text
+    assert 'args = ["./subdispatch_mcp.py"]' in text
     assert 'args = ["old.py"]' not in text
     assert "[other]" in text
 
@@ -43,7 +44,7 @@ def test_install_config_replaces_existing_section(tmp_path):
 def test_write_global_launcher_points_to_source_root(tmp_path):
     source_root = tmp_path / "source"
     source_root.mkdir()
-    launcher_path = tmp_path / "home" / ".codexsaver" / "codexsaver_mcp.py"
+    launcher_path = tmp_path / "home" / ".subdispatch" / "subdispatch_mcp.py"
     result = write_global_launcher(str(source_root), str(launcher_path))
     assert result["changed"] is True
     text = launcher_path.read_text(encoding="utf-8")
@@ -55,7 +56,7 @@ def test_install_global_config_uses_stable_launcher(tmp_path):
     config_path = tmp_path / ".codex" / "config.toml"
     source_root = tmp_path / "source"
     source_root.mkdir()
-    launcher_path = tmp_path / ".codexsaver" / "codexsaver_mcp.py"
+    launcher_path = tmp_path / ".subdispatch" / "subdispatch_mcp.py"
     with monkeypatch_context_global_launcher(launcher_path):
         result = install_global_config(str(config_path), str(source_root))
     text = config_path.read_text(encoding="utf-8")
@@ -66,16 +67,15 @@ def test_install_global_config_uses_stable_launcher(tmp_path):
 
 def test_doctor_reports_missing_setup(tmp_path, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.delenv("CODEXSAVER_API_KEY", raising=False)
-    monkeypatch.setattr("codexsaver.installer.CONFIG_PATH", tmp_path / "missing.json")
-    monkeypatch.setattr("codexsaver.config.CONFIG_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr("subdispatch.installer.CONFIG_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr("subdispatch.config.CONFIG_PATH", tmp_path / "missing.json")
     result = doctor(str(tmp_path))
     assert result["script_exists"] is False
     assert "project root" in result["recommended_next_step"]
 
 
 def test_cli_install_and_doctor(tmp_path, monkeypatch, capsys):
-    (tmp_path / "codexsaver_mcp.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "subdispatch_mcp.py").write_text("print('ok')\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     assert main(["install", "--project", "--workspace", str(tmp_path)]) == 0
     install_output = json.loads(capsys.readouterr().out)
@@ -83,13 +83,12 @@ def test_cli_install_and_doctor(tmp_path, monkeypatch, capsys):
     assert Path(install_output["actions"][0]["config_path"]).exists()
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-    monkeypatch.delenv("CODEXSAVER_API_KEY", raising=False)
-    monkeypatch.setattr("codexsaver.installer.CONFIG_PATH", tmp_path / ".codexsaver-config.json")
-    monkeypatch.setattr("codexsaver.config.CONFIG_PATH", tmp_path / ".codexsaver-config.json")
+    monkeypatch.setattr("subdispatch.installer.CONFIG_PATH", tmp_path / ".subdispatch-config.json")
+    monkeypatch.setattr("subdispatch.config.CONFIG_PATH", tmp_path / ".subdispatch-config.json")
     assert main(["doctor", "--workspace", str(tmp_path)]) == 0
     doctor_output = json.loads(capsys.readouterr().out)
     assert doctor_output["project_config_exists"] is True
-    assert doctor_output["project_config_has_codexsaver"] is True
+    assert doctor_output["project_config_has_subdispatch"] is True
     assert doctor_output["provider"] == "deepseek"
     assert doctor_output["provider_api_key_configured"] is True
     assert doctor_output["deepseek_api_key_configured"] is True
@@ -97,11 +96,11 @@ def test_cli_install_and_doctor(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_install_defaults_to_global(tmp_path, monkeypatch, capsys):
-    (tmp_path / "codexsaver_mcp.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "subdispatch_mcp.py").write_text("print('ok')\n", encoding="utf-8")
     home = tmp_path / "home"
-    launcher = home / ".codexsaver" / "codexsaver_mcp.py"
+    launcher = home / ".subdispatch" / "subdispatch_mcp.py"
     monkeypatch.setattr("cli.Path.home", lambda: home)
-    monkeypatch.setattr("codexsaver.installer.GLOBAL_LAUNCHER_PATH", launcher)
+    monkeypatch.setattr("subdispatch.installer.GLOBAL_LAUNCHER_PATH", launcher)
     assert main(["install", "--workspace", str(tmp_path)]) == 0
     install_output = json.loads(capsys.readouterr().out)
     action = install_output["actions"][0]
@@ -112,7 +111,7 @@ def test_cli_install_defaults_to_global(tmp_path, monkeypatch, capsys):
 
 def test_cli_auth_set(tmp_path, monkeypatch, capsys):
     config_path = tmp_path / "saved-config.json"
-    monkeypatch.setattr("codexsaver.config.CONFIG_PATH", config_path)
+    monkeypatch.setattr("subdispatch.config.CONFIG_PATH", config_path)
     assert main([
         "auth", "set",
         "--provider", "openai",
@@ -129,7 +128,7 @@ def test_cli_auth_set(tmp_path, monkeypatch, capsys):
 
 def test_cli_auth_set_local_provider_without_key(tmp_path, monkeypatch, capsys):
     config_path = tmp_path / "saved-config.json"
-    monkeypatch.setattr("codexsaver.config.CONFIG_PATH", config_path)
+    monkeypatch.setattr("subdispatch.config.CONFIG_PATH", config_path)
     assert main(["auth", "set", "--provider", "ollama", "--model", "llama3.1"]) == 0
     auth_output = json.loads(capsys.readouterr().out)
     assert auth_output["provider"] == "ollama"
@@ -156,12 +155,12 @@ class monkeypatch_context_global_launcher:
         self.previous = None
 
     def __enter__(self):
-        import codexsaver.installer as installer
+        import subdispatch.installer as installer
 
         self.previous = installer.GLOBAL_LAUNCHER_PATH
         installer.GLOBAL_LAUNCHER_PATH = self.launcher_path
 
     def __exit__(self, exc_type, exc, tb):
-        import codexsaver.installer as installer
+        import subdispatch.installer as installer
 
         installer.GLOBAL_LAUNCHER_PATH = self.previous

@@ -1,38 +1,52 @@
-# CodexSaver Agent Policy
+# Code Agent 常驻提示词
 
-You have access to the MCP tool `codexsaver.delegate_task`.
+目标：在长期开发中持续交付原子、可验证、可追溯、可回滚、可接续的改动，同时尽量降低常驻上下文成本。
 
-Use CodexSaver when it can reduce cost safely.
+这份文件只放项目无关的通用工作准则。具体项目的产品目标、架构边界、数据协议、设计规范、当前状态和历史决策，应由项目文档、状态文件和记忆系统承载，不放进这里。
 
-## Good tasks to delegate
+## 1. 工作入口
 
-- repo scanning and code search
-- code explanation and summarization
-- writing unit tests
-- fixing lint/type errors
-- documentation updates
-- boilerplate generation
-- small, localized refactors
+1. 先查看 `git status --short --branch`，确认工作区是否已有未提交改动。
+2. 若项目提供文档路由表（如 `MAP.md`），优先用它判断该读哪些文档、各文档负责什么。
+3. 查找并阅读项目自己的入口文档，例如 README、交接文档、状态文档、设计/协议/路线图文档。
+4. 只读取与当前任务直接相关的文档；不要为了“完整了解”把所有文档长期塞进上下文。
+5. 有历史决策、架构背景、技术债或跨会话上下文疑问时，使用可用的记忆系统检索；纯局部机械改动可以不查，但最终说明原因。
 
-## Do not delegate
+## 2. 原子开发
 
-- architecture decisions
-- auth/security/payment logic
-- database migrations
-- permissions or access-control changes
-- production deployment logic
-- ambiguous requirements
-- final review before applying changes
+每次任务只做一个可验收闭环：
 
-## Workflow
+1. 明确当前任务、影响范围和所属层级。
+2. 做最小可行改动，不顺手扩大范围，不做假想未来抽象。
+3. 不回退用户或其他 agent 的无关改动。
+4. 改动必须可验证；至少运行格式/差异检查，源码改动通常需要运行项目构建或测试命令。
+5. 如果无法验证，说明原因、替代检查方式和剩余风险。
 
-1. Decide whether the task is low risk.
-2. If low risk, call `codexsaver.delegate_task`.
-3. Review the returned patch and risk notes.
-4. Apply changes only if safe.
-5. Run or recommend `commands_to_run`.
-6. If CodexSaver returns `needs_codex`, take over directly.
+## 3. 状态与文档
 
-## Principle
+长期项目必须维护可接续状态：
 
-DeepSeek does the cheap work. Codex makes the decisions.
+- 真实代码、协议、架构、release、重要文档、风险、阻塞、技术债变化，应更新项目状态文档。
+- 行为或协议变化，应同步对应规范文档。
+- 重要设计决策、排除方案、关键限制和技术债变化，应写入记忆系统。
+- 状态文件记录本次工程闭环；记忆系统记录跨会话决策背景。两者不能互相替代。
+
+## 4. 记忆系统
+
+- 断言项目历史、既有约定、架构背景、技术债原因前，先检索记忆系统或项目归档。
+- 完成重要决策、排除某个方案、发现关键限制、确认/缓解/新增技术债时，写入记忆系统。
+- 写入记忆时记录：做了什么、为什么、排除了什么、风险或后续路径。
+- 记忆系统用于跨会话语义检索；项目文档用于当前状态、规范和可随代码版本审计的记录。
+
+## 5. 工程边界
+
+- 优先保持既有架构边界和局部一致性。
+- 修改关键路径前先理解责任归属、输入输出和失败模式。
+- 临时方案必须显式说明影响范围、风险和后续处理路径。
+- 技术债可以存在，但不能隐形存在。
+
+## 6. Git
+
+- 未经用户验收，不提交、不推送；用户明确要求同步、release、提交或推送时除外。
+- 一次提交只做一件清晰的事，不混入无关清理。
+- 提交信息使用 `<type>(<scope>): <summary>`。

@@ -20,7 +20,7 @@ DEFAULT_CONSTRAINTS = [
 ]
 
 
-class CodexSaverEngine:
+class SubDispatchDelegateEngine:
     def __init__(self):
         self.router = Router()
         self.verifier = Verifier()
@@ -61,7 +61,7 @@ class CodexSaverEngine:
             return {
                 "route": "codex", "status": "needs_codex",
                 "decision": to_dict(decision), "estimated_savings_percent": 0,
-                "message": "CodexSaver recommends Codex handle this task directly.",
+                "message": "SubDispatch recommends the primary agent handle this task directly.",
                 "interaction": self._interaction_payload(
                     decision=to_dict(decision),
                     route="codex",
@@ -144,24 +144,24 @@ class CodexSaverEngine:
                              detail: str) -> Dict[str, Any]:
         task_type = decision["task_type"]
         risk = decision["risk"]
-        tool_name = "codexsaver.delegate_task"
+        tool_name = "subdispatch.delegate_task"
         if route == "deepseek" and status == "success":
-            headline = "CodexSaver delegated this task to the configured worker provider."
+            headline = "SubDispatch delegated this task to the configured worker provider."
             next_step = "Review the worker result and apply it only if the patch looks safe."
         elif route == "deepseek" and status == "dry_run":
-            headline = "CodexSaver previewed a delegated run."
+            headline = "SubDispatch previewed a delegated run."
             next_step = "Call the tool without dry_run to execute the delegated task."
         elif status == "failed":
-            headline = "CodexSaver attempted delegation but returned control to Codex."
-            next_step = "Handle the task in Codex or retry after fixing the worker/API issue."
+            headline = "SubDispatch attempted delegation but returned control to the primary agent."
+            next_step = "Handle the task directly or retry after fixing the worker/API issue."
         else:
-            headline = "CodexSaver kept this task in Codex."
-            next_step = "Use Codex directly because the task is risky, protected, or ambiguous."
+            headline = "SubDispatch kept this task with the primary agent."
+            next_step = "Handle it directly because the task is risky, protected, or ambiguous."
         return {
             "tool": tool_name,
             "mode": mode,
             "headline": headline,
-            "route_label": f"[CodexSaver] route={route} task_type={task_type} risk={risk}",
+            "route_label": f"[SubDispatch] route={route} task_type={task_type} risk={risk}",
             "reason": decision["reason"],
             "detail": detail,
             "estimated_savings_percent": estimated_savings_percent,

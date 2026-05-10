@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from codexsaver.router import Router, DELEGATABLE, PROTECTED_PATH_KEYWORDS
+from subdispatch.router import Router, DELEGATABLE, PROTECTED_PATH_KEYWORDS
 
 
 class TestRouter:

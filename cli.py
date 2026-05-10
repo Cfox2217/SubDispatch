@@ -6,21 +6,25 @@ import json
 import sys
 from pathlib import Path
 
-from codexsaver.engine import CodexSaverEngine
-from codexsaver.config import PROVIDER_PRESETS, normalize_provider, save_provider_config
-from codexsaver.installer import doctor, install_config, install_global_config
+from subdispatch.engine import SubDispatchDelegateEngine
+from subdispatch.config import PROVIDER_PRESETS, normalize_provider, save_provider_config
+from subdispatch.installer import doctor, install_config, install_global_config
+from subdispatch.subdispatch import SubDispatchEngine, init_env
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv or sys.argv[1:]
-    if argv and argv[0] in {"install", "doctor", "delegate", "auth"}:
+    if argv and argv[0] in {
+        "install", "doctor", "delegate", "auth", "workers", "start-run",
+        "poll-run", "collect-task", "delete-worktree", "init-env",
+    }:
         return _run_subcommand(argv)
     return _run_delegate(argv)
 
 
 def _run_delegate(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        description="CodexSaver CLI",
+        description="SubDispatch CLI",
         epilog=(
             "Quick setup: `python cli.py install` then "
             "`python cli.py doctor`."
@@ -33,7 +37,7 @@ def _run_delegate(argv: list[str]) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    result = CodexSaverEngine().delegate_task({
+    result = SubDispatchDelegateEngine().delegate_task({
         "instruction": args.instruction,
         "files": args.files,
         "constraints": args.constraint,
@@ -45,12 +49,12 @@ def _run_delegate(argv: list[str]) -> int:
 
 
 def _run_subcommand(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="CodexSaver setup and diagnostics")
+    parser = argparse.ArgumentParser(description="SubDispatch setup and diagnostics")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     install_parser = subparsers.add_parser(
         "install",
-        help="Write Codex MCP config for this project or globally.",
+        help="Write SubDispatch MCP config for this project or globally.",
     )
     install_parser.add_argument("--workspace", default=".")
     install_parser.add_argument("--project", action="store_true")
@@ -58,7 +62,7 @@ def _run_subcommand(argv: list[str]) -> int:
 
     doctor_parser = subparsers.add_parser(
         "doctor",
-        help="Check whether CodexSaver is ready in this workspace.",
+        help="Check whether SubDispatch is ready in this workspace.",
     )
     doctor_parser.add_argument("--workspace", default=".")
 
@@ -91,6 +95,50 @@ def _run_subcommand(argv: list[str]) -> int:
     delegate_parser.add_argument("--workspace", default=".")
     delegate_parser.add_argument("--dry-run", action="store_true")
 
+    subparsers.add_parser(
+        "workers",
+        help="List SubDispatch workers and current concurrency capacity.",
+    ).add_argument("--workspace", default=".")
+
+    init_env_parser = subparsers.add_parser(
+        "init-env",
+        help="Create .env and .env.example templates for SubDispatch.",
+    )
+    init_env_parser.add_argument("--workspace", default=".")
+    init_env_parser.add_argument("--overwrite", action="store_true")
+
+    start_run_parser = subparsers.add_parser(
+        "start-run",
+        help="Start a SubDispatch run from a JSON file.",
+    )
+    start_run_parser.add_argument("json_file")
+    start_run_parser.add_argument("--workspace", default=".")
+
+    poll_run_parser = subparsers.add_parser(
+        "poll-run",
+        help="Poll a SubDispatch run.",
+    )
+    poll_run_parser.add_argument("run_id")
+    poll_run_parser.add_argument("--workspace", default=".")
+
+    collect_task_parser = subparsers.add_parser(
+        "collect-task",
+        help="Collect one SubDispatch task artifact.",
+    )
+    collect_task_parser.add_argument("run_id")
+    collect_task_parser.add_argument("task_id")
+    collect_task_parser.add_argument("--workspace", default=".")
+
+    delete_worktree_parser = subparsers.add_parser(
+        "delete-worktree",
+        help="Delete one SubDispatch task worktree.",
+    )
+    delete_worktree_parser.add_argument("run_id")
+    delete_worktree_parser.add_argument("task_id")
+    delete_worktree_parser.add_argument("--workspace", default=".")
+    delete_worktree_parser.add_argument("--force", action="store_true")
+    delete_worktree_parser.add_argument("--delete-branch", action="store_true")
+
     args = parser.parse_args(argv)
 
     if args.command == "install":
@@ -101,7 +149,7 @@ def _run_subcommand(argv: list[str]) -> int:
         if install_project:
             reports.append(install_config(
                 str(workspace / ".codex" / "config.toml"),
-                "./codexsaver_mcp.py",
+                "./subdispatch_mcp.py",
             ))
         if install_global:
             reports.append(install_global_config(
@@ -163,11 +211,68 @@ def _run_subcommand(argv: list[str]) -> int:
             "deepseek_api_key_preview": (
                 report["key_preview"] if report["provider"] == "deepseek" else None
             ),
-            "next_step": "Run `python cli.py doctor` to verify CodexSaver can see the saved key.",
+            "next_step": "Run `python cli.py doctor` to verify SubDispatch can see the saved key.",
         }, ensure_ascii=False, indent=2))
         return 0
 
-    result = CodexSaverEngine().delegate_task({
+    if args.command == "workers":
+        print(json.dumps(
+            SubDispatchEngine(workspace=args.workspace).list_workers(),
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 0
+
+    if args.command == "init-env":
+        print(json.dumps(
+            init_env(workspace=args.workspace, overwrite=args.overwrite),
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 0
+
+    if args.command == "start-run":
+        input_data = json.loads(Path(args.json_file).read_text(encoding="utf-8"))
+        print(json.dumps(
+            SubDispatchEngine(workspace=args.workspace).start_run(input_data),
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 0
+
+    if args.command == "poll-run":
+        print(json.dumps(
+            SubDispatchEngine(workspace=args.workspace).poll_run({"run_id": args.run_id}),
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 0
+
+    if args.command == "collect-task":
+        print(json.dumps(
+            SubDispatchEngine(workspace=args.workspace).collect_task({
+                "run_id": args.run_id,
+                "task_id": args.task_id,
+            }),
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 0
+
+    if args.command == "delete-worktree":
+        print(json.dumps(
+            SubDispatchEngine(workspace=args.workspace).delete_worktree({
+                "run_id": args.run_id,
+                "task_id": args.task_id,
+                "force": args.force,
+                "delete_branch": args.delete_branch,
+            }),
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 0
+
+    result = SubDispatchDelegateEngine().delegate_task({
         "instruction": args.instruction,
         "files": args.files,
         "constraints": args.constraint,

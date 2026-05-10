@@ -22,16 +22,16 @@ class ContextPacker:
         for raw in file_paths[: self.max_files]:
             path = self._resolve_path(raw)
             if not path.exists() or not path.is_file():
-                contexts.append(FileContext(path=raw, content=f"/* CodexSaver: file not found: {raw} */"))
+                contexts.append(FileContext(path=raw, content=f"/* SubDispatch: file not found: {raw} */"))
                 continue
             content = path.read_text(encoding="utf-8", errors="replace")
             if len(content) > self.max_chars_per_file:
-                content = content[: self.max_chars_per_file] + "\n\n/* ... truncated by CodexSaver ... */"
+                content = content[: self.max_chars_per_file] + "\n\n/* ... truncated by SubDispatch ... */"
             remaining = self.max_total_chars - total
             if remaining <= 0:
                 break
             if len(content) > remaining:
-                content = content[:remaining] + "\n\n/* ... total context truncated by CodexSaver ... */"
+                content = content[:remaining] + "\n\n/* ... total context truncated by SubDispatch ... */"
             contexts.append(FileContext(path=str(path), content=content))
             total += len(content)
         return contexts

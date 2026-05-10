@@ -7,15 +7,16 @@ from typing import Any, Dict
 from .config import CONFIG_DIR, CONFIG_PATH, mask_secret, resolve_provider_config
 
 SECTION_RE = re.compile(
-    r"(?ms)^\[mcp_servers\.codexsaver\]\n.*?(?=^\[|\Z)"
+    r"(?ms)^\[mcp_servers\.subdispatch\]\n.*?(?=^\[|\Z)"
 )
+SUBDISPATCH_SECTION_RE = re.compile(r"(?m)^\[mcp_servers\.subdispatch\]\s*$")
 
-GLOBAL_LAUNCHER_PATH = CONFIG_DIR / "codexsaver_mcp.py"
+GLOBAL_LAUNCHER_PATH = CONFIG_DIR / "subdispatch_mcp.py"
 
 
 def render_mcp_config(script_path: str) -> str:
     return (
-        "[mcp_servers.codexsaver]\n"
+        "[mcp_servers.subdispatch]\n"
         'command = "python"\n'
         f'args = ["{script_path}"]\n'
         "startup_timeout_sec = 10\n"
@@ -86,10 +87,10 @@ import sys
 from pathlib import Path
 
 SOURCE_ROOT = Path({str(source_root)!r})
-MCP_SCRIPT = SOURCE_ROOT / "codexsaver_mcp.py"
+MCP_SCRIPT = SOURCE_ROOT / "subdispatch_mcp.py"
 
 if not MCP_SCRIPT.exists():
-    raise SystemExit(f"CodexSaver MCP script not found: {{MCP_SCRIPT}}")
+    raise SystemExit(f"SubDispatch MCP script not found: {{MCP_SCRIPT}}")
 
 sys.path.insert(0, str(SOURCE_ROOT))
 runpy.run_path(str(MCP_SCRIPT), run_name="__main__")
@@ -98,22 +99,23 @@ runpy.run_path(str(MCP_SCRIPT), run_name="__main__")
 
 def doctor(workspace: str) -> Dict[str, Any]:
     root = Path(workspace).resolve()
-    script_path = root / "codexsaver_mcp.py"
+    script_path = root / "subdispatch_mcp.py"
     project_config = root / ".codex" / "config.toml"
     global_config = Path.home() / ".codex" / "config.toml"
-    project_config_has_codexsaver = _has_codexsaver_section(project_config)
-    global_config_has_codexsaver = _has_codexsaver_section(global_config)
+    project_config_has_subdispatch = _has_mcp_section(project_config, "subdispatch")
+    global_config_has_subdispatch = _has_mcp_section(global_config, "subdispatch")
     provider = resolve_provider_config()
+    script_exists = script_path.exists()
     return {
         "workspace": str(root),
-        "script_exists": script_path.exists(),
+        "script_exists": script_exists,
         "script_path": str(script_path),
         "project_config_path": str(project_config),
         "project_config_exists": project_config.exists(),
-        "project_config_has_codexsaver": project_config_has_codexsaver,
+        "project_config_has_subdispatch": project_config_has_subdispatch,
         "global_config_path": str(global_config),
         "global_config_exists": global_config.exists(),
-        "global_config_has_codexsaver": global_config_has_codexsaver,
+        "global_config_has_subdispatch": global_config_has_subdispatch,
         "global_launcher_path": str(GLOBAL_LAUNCHER_PATH),
         "global_launcher_exists": GLOBAL_LAUNCHER_PATH.exists(),
         "local_config_path": str(CONFIG_PATH),
@@ -132,25 +134,28 @@ def doctor(workspace: str) -> Dict[str, Any]:
         "deepseek_api_key_source": provider.api_key_source,
         "deepseek_api_key_preview": mask_secret(provider.api_key),
         "recommended_next_step": _recommended_next_step(
-            script_exists=script_path.exists(),
-            codexsaver_installed=project_config_has_codexsaver or global_config_has_codexsaver,
+            script_exists=script_exists,
+            mcp_installed=project_config_has_subdispatch or global_config_has_subdispatch,
             api_key_configured=bool(provider.api_key) or not provider.requires_api_key,
         ),
     }
 
 
-def _has_codexsaver_section(path: Path) -> bool:
+def _has_mcp_section(path: Path, name: str | None = None) -> bool:
     if not path.exists():
         return False
-    return bool(SECTION_RE.search(path.read_text(encoding="utf-8")))
+    text = path.read_text(encoding="utf-8")
+    if name == "subdispatch":
+        return bool(SUBDISPATCH_SECTION_RE.search(text))
+    return bool(SECTION_RE.search(text))
 
 
-def _recommended_next_step(script_exists: bool, codexsaver_installed: bool,
+def _recommended_next_step(script_exists: bool, mcp_installed: bool,
                            api_key_configured: bool) -> str:
     if not script_exists:
-        return "Run this command from the CodexSaver project root."
-    if not codexsaver_installed:
-        return "Run `python cli.py install` to enable CodexSaver in every Codex workspace."
+        return "Run this command from the SubDispatch project root."
+    if not mcp_installed:
+        return "Run `python cli.py install` to enable SubDispatch in every Codex workspace."
     if not api_key_configured:
         return "Run `python cli.py auth set --provider deepseek --api-key ...` before live delegated calls."
-    return "CodexSaver is ready. Open this workspace in Codex and call codexsaver.delegate_task."
+    return "SubDispatch is ready. Open this workspace in Codex and call subdispatch.delegate_task."

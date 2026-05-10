@@ -5,12 +5,12 @@ import sys
 import tempfile
 import pytest
 from unittest.mock import patch, MagicMock
-from codexsaver.engine import CodexSaverEngine, DEFAULT_CONSTRAINTS
+from subdispatch.engine import DEFAULT_CONSTRAINTS, SubDispatchDelegateEngine
 
 
-class TestCodexSaverEngine:
+class TestSubDispatchDelegateEngine:
     def setup_method(self):
-        self.engine = CodexSaverEngine()
+        self.engine = SubDispatchDelegateEngine()
 
     def test_delegate_task_routes_high_risk_to_codex(self):
         result = self.engine.delegate_task({
@@ -45,7 +45,7 @@ class TestCodexSaverEngine:
         assert "No external model call" in result["interaction"]["detail"]
 
     def test_delegate_task_calls_deepseek(self):
-        with patch("codexsaver.engine.ProviderClient") as MockClient:
+        with patch("subdispatch.engine.ProviderClient") as MockClient:
             mock_instance = MagicMock()
             mock_instance.complete_task.return_value = {
                 "status": "success",
@@ -71,8 +71,8 @@ class TestCodexSaverEngine:
             mock_instance.complete_task.assert_called_once()
 
     def test_delegate_task_deepseek_failure_returns_codex(self):
-        with patch("codexsaver.engine.ProviderClient") as MockClient:
-            from codexsaver.provider import ProviderError
+        with patch("subdispatch.engine.ProviderClient") as MockClient:
+            from subdispatch.provider import ProviderError
             mock_instance = MagicMock()
             mock_instance.complete_task.side_effect = ProviderError("API error")
             MockClient.return_value = mock_instance
@@ -87,7 +87,7 @@ class TestCodexSaverEngine:
             assert result["interaction"]["mode"] == "codex_takeover"
 
     def test_delegate_task_verification_failure(self):
-        with patch("codexsaver.engine.ProviderClient") as MockClient:
+        with patch("subdispatch.engine.ProviderClient") as MockClient:
             mock_instance = MagicMock()
             mock_instance.complete_task.return_value = {
                 "status": "success",
@@ -107,7 +107,7 @@ class TestCodexSaverEngine:
             assert result["status"] == "needs_codex"
 
     def test_default_constraints_added(self):
-        with patch("codexsaver.engine.ProviderClient") as MockClient:
+        with patch("subdispatch.engine.ProviderClient") as MockClient:
             mock_instance = MagicMock()
             mock_instance.complete_task.return_value = {
                 "status": "success",
@@ -132,7 +132,7 @@ class TestCodexSaverEngine:
                 assert c in task.constraints
 
     def test_max_files_parameter(self):
-        with patch("codexsaver.engine.ProviderClient") as MockClient:
+        with patch("subdispatch.engine.ProviderClient") as MockClient:
             mock_instance = MagicMock()
             mock_instance.complete_task.return_value = {
                 "status": "success",
@@ -158,7 +158,7 @@ class TestCodexSaverEngine:
             sample = os.path.join(tmpdir, "sample.txt")
             with open(sample, "w") as f:
                 f.write("hello")
-            with patch("codexsaver.engine.ProviderClient") as MockClient:
+            with patch("subdispatch.engine.ProviderClient") as MockClient:
                 mock_instance = MagicMock()
                 mock_instance.complete_task.return_value = {
                     "status": "success",
@@ -182,7 +182,7 @@ class TestCodexSaverEngine:
                 assert result["verification"]["executed_commands"] == []
 
     def test_delegate_task_runs_verification_commands(self):
-        with patch("codexsaver.engine.ProviderClient") as MockClient:
+        with patch("subdispatch.engine.ProviderClient") as MockClient:
             mock_instance = MagicMock()
             mock_instance.complete_task.return_value = {
                 "status": "success",
