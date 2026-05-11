@@ -115,7 +115,7 @@ impl SubDispatchEngine {
         let root = workspace.join(".subdispatch");
         Ok(Self {
             runs_dir: root.join("runs"),
-            worktrees_dir: root.join("worktrees"),
+            worktrees_dir: root.join("worktrees").join("tasks"),
             integration_branch,
             workspace,
             workers,
@@ -1016,9 +1016,17 @@ impl SubDispatchEngine {
     }
 
     fn integration_worktree_path(&self) -> PathBuf {
+        let project = self
+            .workspace
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(safe_path_component)
+            .unwrap_or_else(|| "workspace".to_string());
         self.workspace
             .join(".subdispatch")
+            .join("worktrees")
             .join("integration")
+            .join(project)
             .join(&self.integration_branch)
     }
 
@@ -1460,6 +1468,19 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn safe_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn shell_quote(value: &str) -> String {
     if value
         .chars()
@@ -1618,8 +1639,20 @@ mod tests {
         assert_eq!(
             engine.integration_worktree_path(),
             root.join(".subdispatch")
+                .join("worktrees")
                 .join("integration")
+                .join(safe_path_component(
+                    root.file_name().unwrap().to_str().unwrap()
+                ))
                 .join("worktree_main")
+        );
+    }
+
+    #[test]
+    fn safe_path_component_replaces_path_unsafe_chars() {
+        assert_eq!(
+            safe_path_component("Sub Dispatch/alpha"),
+            "Sub_Dispatch_alpha"
         );
     }
 
