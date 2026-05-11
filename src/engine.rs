@@ -1,4 +1,4 @@
-use crate::config::{default_workers, load_env, WorkerConfig};
+use crate::config::{default_workers, load_env, WorkerConfig, DEFAULT_INTEGRATION_BRANCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
@@ -22,6 +22,7 @@ pub struct SubDispatchEngine {
     workspace: PathBuf,
     runs_dir: PathBuf,
     worktrees_dir: PathBuf,
+    integration_branch: String,
     workers: BTreeMap<String, WorkerConfig>,
 }
 
@@ -106,10 +107,16 @@ impl SubDispatchEngine {
         let workspace = absolute_path(&workspace)?;
         let env = load_env(&workspace)?;
         let workers = default_workers(&env)?;
+        let integration_branch = env
+            .get("SUBDISPATCH_INTEGRATION_BRANCH")
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_INTEGRATION_BRANCH.to_string());
         let root = workspace.join(".subdispatch");
         Ok(Self {
             runs_dir: root.join("runs"),
             worktrees_dir: root.join("worktrees"),
+            integration_branch,
             workspace,
             workers,
         })
@@ -164,6 +171,31 @@ impl SubDispatchEngine {
         Ok(json!({ "status": "ok", "workers": workers }))
     }
 
+    pub fn init_integration(&mut self) -> Result<Value, String> {
+        self.ensure_git_repo()?;
+        let branch = self.integration_branch.clone();
+        if !self.branch_exists(&branch) {
+            self.git(&["branch", &branch, "HEAD"])?;
+        }
+        let path = self.integration_worktree_path();
+        if !path.exists() {
+            fs::create_dir_all(path.parent().unwrap_or(&self.workspace)).map_err(|err| {
+                format!(
+                    "failed to create integration worktree parent {}: {err}",
+                    path.display()
+                )
+            })?;
+            self.git(&["worktree", "add", &path.display().to_string(), &branch])?;
+        }
+        Ok(json!({
+            "status": "ok",
+            "branch": branch,
+            "worktree": path.display().to_string(),
+            "head": self.git(&["rev-parse", &branch])?.trim(),
+            "dirty": !self.git_status_short_in(&path)?.is_empty(),
+        }))
+    }
+
     pub fn start_run(&mut self, input: Value) -> Result<Value, String> {
         self.ensure_git_repo()?;
         let goal = required_string(&input, "goal")?;
@@ -174,12 +206,19 @@ impl SubDispatchEngine {
         if tasks.is_empty() {
             return Err("start_run requires at least one task".to_string());
         }
+        let explicit_base = input
+            .get("base")
+            .or_else(|| input.get("base_branch"))
+            .is_some();
         let base_ref = input
             .get("base")
             .or_else(|| input.get("base_branch"))
             .and_then(Value::as_str)
-            .unwrap_or("HEAD")
+            .unwrap_or(&self.integration_branch)
             .to_string();
+        if !explicit_base {
+            self.require_clean_integration_branch(&base_ref)?;
+        }
         let base_commit = self.git(&["rev-parse", &base_ref])?.trim().to_string();
         let workspace_dirty_summary = self.workspace_dirty_summary()?;
         let workspace_dirty = !workspace_dirty_summary.is_empty();
@@ -938,6 +977,55 @@ impl SubDispatchEngine {
         run_command("git", args, cwd)
     }
 
+    fn require_clean_integration_branch(&self, branch: &str) -> Result<(), String> {
+        if !self.branch_exists(branch) {
+            return Err(format!(
+                "integration branch {branch:?} does not exist. Run `subdispatch init-integration --workspace {}` or pass an explicit base.",
+                self.workspace.display()
+            ));
+        }
+        let worktree = self.find_worktree_for_branch(branch)?;
+        let status = self.git_status_short_in(&worktree)?;
+        if !status.is_empty() {
+            return Err(format!(
+                "integration branch {branch:?} has uncommitted changes in {}. Commit a checkpoint before delegating, or pass an explicit base.",
+                worktree.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn find_worktree_for_branch(&self, branch: &str) -> Result<PathBuf, String> {
+        let output = self.git(&["worktree", "list", "--porcelain"])?;
+        let mut current_path: Option<PathBuf> = None;
+        for line in output.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                current_path = Some(PathBuf::from(path));
+            } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+                if value == branch {
+                    if let Some(path) = current_path {
+                        return Ok(path);
+                    }
+                }
+            }
+        }
+        Err(format!(
+            "integration branch {branch:?} has no checked-out worktree. Run `subdispatch init-integration --workspace {}`.",
+            self.workspace.display()
+        ))
+    }
+
+    fn integration_worktree_path(&self) -> PathBuf {
+        self.workspace
+            .join(".subdispatch")
+            .join("integration")
+            .join(&self.integration_branch)
+    }
+
+    fn git_status_short_in(&self, cwd: &Path) -> Result<String, String> {
+        self.git_in(cwd, &["status", "--short"])
+    }
+
     fn workspace_dirty_summary(&self) -> Result<Vec<String>, String> {
         let status = self.git(&["status", "--short"])?;
         Ok(status
@@ -1460,6 +1548,7 @@ mod tests {
             workspace: root.clone(),
             runs_dir: root.join(".subdispatch").join("runs"),
             worktrees_dir: root.join(".subdispatch").join("worktrees"),
+            integration_branch: DEFAULT_INTEGRATION_BRANCH.to_string(),
             workers: BTreeMap::new(),
         };
         let run_id = "run_dirty";
@@ -1514,6 +1603,24 @@ mod tests {
         assert_eq!(recovered.workspace_dirty_summary, vec!["M src/engine.rs"]);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn integration_worktree_path_uses_managed_directory() {
+        let root = env::temp_dir().join(format!("subdispatch-path-test-{}", now_secs()));
+        let engine = SubDispatchEngine {
+            workspace: root.clone(),
+            runs_dir: root.join(".subdispatch").join("runs"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees"),
+            integration_branch: "worktree_main".to_string(),
+            workers: BTreeMap::new(),
+        };
+        assert_eq!(
+            engine.integration_worktree_path(),
+            root.join(".subdispatch")
+                .join("integration")
+                .join("worktree_main")
+        );
     }
 
     #[test]

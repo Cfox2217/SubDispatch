@@ -75,10 +75,22 @@ subdispatch init-env
 - 可用槽位
 - 不可用原因（如有）
 
+### `init_integration`
+
+创建或检查持久集成分支/工作树。默认分支为 `worktree_main`，可通过
+`SUBDISPATCH_INTEGRATION_BRANCH` 配置。
+
+推荐主代理在这条集成线上开发并提交 checkpoint。`start_run` 未显式传入 `base`
+时，子代理任务会从集成分支 HEAD 派生。如果集成工作树存在未提交改动，
+SubDispatch 会拒绝启动委托，直到主代理提交 checkpoint，或显式指定其他 `base`。
+
 ### `start_run`
 
 从主 LLM 提供的任务列表启动一个 run。对每个任务，SubDispatch 创建分支和工作树、
 写入任务提示词，并在容量可用时启动已配置的 worker。超过 worker 并发限制的任务保持排队。
+
+未传 `base`/`base_branch` 时，默认从配置的集成分支 HEAD 启动。显式传入
+`base` 仍可覆盖这个默认行为。
 
 任务可以包含可选的 `context` 或 `context_files`，由主代理显式提供。
 这是把未提交 diff、临时审计说明或其他不在子 worktree 基础提交中的信息交给子代理的正确方式。
@@ -136,6 +148,7 @@ subdispatch init-env
 
 ```bash
 cargo run -- workers --workspace .
+cargo run -- init-integration --workspace .
 cargo run -- mcp --workspace .
 cargo run -- serve --workspace . --bind 127.0.0.1:8765
 ```
@@ -144,6 +157,7 @@ cargo run -- serve --workspace . --bind 127.0.0.1:8765
 
 ```bash
 subdispatch workers --workspace .
+subdispatch init-integration --workspace .
 subdispatch mcp --workspace .
 subdispatch serve --workspace . --bind 127.0.0.1:8765
 ```

@@ -69,12 +69,28 @@ Returns available workers and current capacity:
 - available slots
 - unavailable reason, if any
 
+### `init_integration`
+
+Creates or verifies the persistent integration branch/worktree used as the
+default delegation base. The default branch is `worktree_main`, configurable
+through `SUBDISPATCH_INTEGRATION_BRANCH`.
+
+The primary agent should develop and checkpoint work on this integration line.
+When `start_run` omits `base`, SubDispatch creates child task branches from the
+integration branch HEAD. If that integration worktree has uncommitted changes,
+`start_run` refuses to delegate until the primary agent commits a checkpoint or
+passes an explicit `base`.
+
 ### `start_run`
 
 Starts a run from a primary-LLM supplied task list. For every task,
 SubDispatch creates a branch and worktree, writes a task prompt, and starts the
 configured worker when capacity is available. Tasks over the worker concurrency
 limit stay queued.
+
+If `base`/`base_branch` is omitted, the run starts from the configured
+integration branch HEAD. Passing `base` remains an explicit override for special
+cases.
 
 If the primary workspace has uncommitted changes, SubDispatch records a
 redacted `git status --short` summary on the run and every task, and injects

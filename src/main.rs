@@ -49,6 +49,11 @@ enum Command {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
+    /// Create or verify the persistent integration branch/worktree.
+    InitIntegration {
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+    },
     /// Start a run from a JSON file.
     StartRun {
         json_file: PathBuf,
@@ -146,6 +151,10 @@ fn run() -> Result<(), String> {
         Command::Workers { workspace } => {
             let engine = SubDispatchEngine::new(workspace)?;
             print_json(&engine.list_workers()?)?;
+        }
+        Command::InitIntegration { workspace } => {
+            let mut engine = SubDispatchEngine::new(workspace)?;
+            print_json(&engine.init_integration()?)?;
         }
         Command::StartRun {
             json_file,

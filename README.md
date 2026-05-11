@@ -149,6 +149,7 @@ During local development:
 
 ```bash
 cargo run -- workers --workspace .
+cargo run -- init-integration --workspace .
 cargo run -- mcp --workspace .
 cargo run -- serve --workspace . --bind 127.0.0.1:8765
 ```
@@ -157,6 +158,7 @@ Packaged usage is the same without `cargo run --`:
 
 ```bash
 subdispatch workers --workspace .
+subdispatch init-integration --workspace .
 subdispatch mcp --workspace .
 subdispatch serve --workspace . --bind 127.0.0.1:8765
 ```

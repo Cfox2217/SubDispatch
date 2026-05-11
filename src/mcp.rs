@@ -63,6 +63,7 @@ fn handle_request(workspace: &PathBuf, request: &Value) -> Result<Option<Value>,
             let mut engine = SubDispatchEngine::new(workspace.clone())?;
             let result = match name {
                 "list_workers" => engine.list_workers()?,
+                "init_integration" => engine.init_integration()?,
                 "start_run" => engine.start_run(arguments)?,
                 "poll_run" => {
                     let run_id = required_arg(&arguments, "run_id")?;
@@ -137,8 +138,13 @@ pub fn tool_schemas() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
+            "name": "init_integration",
+            "description": "Create or verify the persistent integration branch/worktree used as the default delegation base.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
             "name": "start_run",
-            "description": "Start multiple child coding-agent tasks in isolated git worktrees.",
+            "description": "Start multiple child coding-agent tasks in isolated git worktrees. When base is omitted, tasks start from the configured integration branch HEAD.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -219,6 +225,7 @@ mod tests {
             names,
             vec![
                 "list_workers",
+                "init_integration",
                 "start_run",
                 "poll_run",
                 "collect_task",
