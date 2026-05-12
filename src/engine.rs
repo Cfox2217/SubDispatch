@@ -1,7 +1,5 @@
 use crate::config::{default_workers, load_env, WorkerConfig};
-use crate::prompts::{
-    apply_worker_prompt_overrides, load_prompt_config, render_child_prompt, PromptConfig,
-};
+use crate::prompts::{load_prompt_config, render_child_prompt, PromptConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
@@ -90,8 +88,7 @@ impl SubDispatchEngine {
         let workspace = absolute_path(&workspace)?;
         let env = load_env(&workspace)?;
         let prompts = load_prompt_config(&workspace)?;
-        let mut workers = default_workers(&env)?;
-        apply_worker_prompt_overrides(&mut workers, &prompts);
+        let workers = default_workers(&env)?;
         let root = workspace.join(".subdispatch");
         Ok(Self {
             tasks_dir: root.join("tasks"),
@@ -139,6 +136,7 @@ impl SubDispatchEngine {
                     "strengths": worker.strengths,
                     "cost": worker.cost,
                     "speed": worker.speed,
+                    "delegation_trust": worker.delegation_trust,
                     "enabled": enabled,
                     "max_concurrency": worker.max_concurrency,
                     "running": running,
@@ -1758,6 +1756,7 @@ mod tests {
                 strengths: Vec::new(),
                 cost: "test".to_string(),
                 speed: "test".to_string(),
+                delegation_trust: "medium".to_string(),
             },
         );
         let mut engine = SubDispatchEngine {

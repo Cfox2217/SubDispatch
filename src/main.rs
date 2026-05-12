@@ -40,6 +40,8 @@ enum Command {
         #[arg(long)]
         global: bool,
     },
+    /// Install the bundled SubDispatch delegation skill for Codex.
+    InstallSkill,
     /// Diagnose local SubDispatch readiness.
     Doctor {
         #[arg(long, default_value = ".")]
@@ -137,6 +139,9 @@ fn run() -> Result<(), String> {
                 install_project,
                 install_global,
             )?)?;
+        }
+        Command::InstallSkill => {
+            print_json(&installer::install_skill()?)?;
         }
         Command::Doctor { workspace } => {
             print_json(&installer::doctor(&workspace)?)?;

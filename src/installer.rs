@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SECTION_HEADER: &str = "[mcp_servers.subdispatch]";
+const SKILL_NAME: &str = "subdispatch-delegation";
+const SKILL_CONTENT: &str = include_str!("../skills/subdispatch-delegation/SKILL.md");
 
 pub fn install(workspace: &Path, project: bool, global: bool) -> Result<Value, String> {
     let mut actions = Vec::new();
@@ -65,6 +67,7 @@ pub fn doctor(workspace: &Path) -> Result<Value, String> {
                 "strengths": worker.strengths,
                 "cost": worker.cost,
                 "speed": worker.speed,
+                "delegation_trust": worker.delegation_trust,
             })
         })
         .collect::<Vec<_>>();
@@ -93,6 +96,21 @@ pub fn doctor(workspace: &Path) -> Result<Value, String> {
         },
         "workers": worker_reports,
         "next_step": recommended_next_step(env_path.exists(), project_mcp_installed || global_mcp_installed, ready)
+    }))
+}
+
+pub fn install_skill() -> Result<Value, String> {
+    let skill_dir = home_dir()?.join(".codex").join("skills").join(SKILL_NAME);
+    fs::create_dir_all(&skill_dir)
+        .map_err(|err| format!("failed to create {}: {err}", skill_dir.display()))?;
+    let skill_path = skill_dir.join("SKILL.md");
+    fs::write(&skill_path, SKILL_CONTENT)
+        .map_err(|err| format!("failed to write {}: {err}", skill_path.display()))?;
+    Ok(json!({
+        "status": "ok",
+        "skill": SKILL_NAME,
+        "path": skill_path.display().to_string(),
+        "next_step": "Restart or reload your agent session so the new skill is discovered."
     }))
 }
 

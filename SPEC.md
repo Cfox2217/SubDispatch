@@ -89,11 +89,16 @@ Returns worker capacity and availability:
       "running": 1,
       "queued": 0,
       "available_slots": 1,
+      "delegation_trust": "high",
       "enabled": true
     }
   ]
 }
 ```
+
+`delegation_trust` is a primary-agent routing hint, not a security guarantee.
+Use it with `strengths`, `cost`, `speed`, `risk`, and available slots to decide
+how aggressively to delegate clear tasks to a worker.
 
 ### `start_task`
 

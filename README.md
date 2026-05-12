@@ -66,11 +66,14 @@ Prompt configuration is stored separately in `.subdispatch/prompts.json`.
 The file is optional; built-in defaults are used when it does not exist. The Web
 UI Prompts page can edit:
 
-- primary-agent usage guidance
 - MCP tool descriptions
 - child-agent prompt template, safety rules, and manifest schema
-- collect/review guidance
-- worker profile descriptions, strengths, cost, speed, and risk hints
+- worker selection and collect/review guidance
+
+Worker metadata is configured only in Setup/.env. This keeps `description`,
+`strengths`, `cost`, `speed`, and `delegation_trust` as one source of truth.
+`delegation_trust` is a routing hint for the primary agent, not a safety
+guarantee.
 
 Prompt changes apply to new MCP tool listings and newly started child tasks.
 Existing tasks are not rewritten.
@@ -88,6 +91,7 @@ Returns available workers and current capacity:
 - running count
 - queued count
 - available slots
+- delegation trust
 - unavailable reason, if any
 
 MCP exposes this interface as `list_workers`; the CLI command is
@@ -206,6 +210,7 @@ Install MCP config for the current project:
 
 ```bash
 subdispatch install --project --workspace .
+subdispatch install-skill
 subdispatch doctor --workspace .
 ```
 

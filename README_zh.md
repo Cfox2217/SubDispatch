@@ -59,11 +59,13 @@ subdispatch init-env
 提示词配置单独存放在 `.subdispatch/prompts.json`。该文件是可选的；
 不存在时使用内置默认值。Web UI 的 Prompts 页面可以编辑：
 
-- 主代理使用 SubDispatch 的指导提示词
 - MCP 工具描述
 - 子代理提示词模板、安全规则和 manifest schema
-- collect/review 指导
-- worker 画像描述、能力、成本、速度和风险提示
+- worker 选择策略和 collect/review 指导
+
+Worker metadata 只在 Setup/.env 中配置，避免双重事实源。`description`、
+`strengths`、`cost`、`speed` 和 `delegation_trust` 都以 `.env` 为准。
+`delegation_trust` 是给主代理看的调度倾向，不是安全保证。
 
 提示词改动会作用于新的 MCP tool listing 和新启动的子任务；已有 task 不会被重写。
 
@@ -80,6 +82,7 @@ subdispatch init-env
 - 运行中数量
 - 排队数量
 - 可用槽位
+- 委派可信度
 - 不可用原因（如有）
 
 MCP 工具名是 `list_workers`；CLI 对应命令是
@@ -187,6 +190,7 @@ Web UI 不是任务创建控制台，只做 Setup 检查、`.env` 初始化、wo
 
 ```bash
 subdispatch install --project --workspace .
+subdispatch install-skill
 subdispatch doctor --workspace .
 ```
 

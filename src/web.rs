@@ -741,9 +741,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
     </div>
     <div class="tabs">
-      <button class="tab active" data-page="activityPage">Activity</button>
-      <button class="tab" data-page="setupPage">Setup</button>
-      <button class="tab" data-page="promptsPage">Prompts</button>
+      <button class="tab active" data-page="activityPage">活动</button>
+      <button class="tab" data-page="setupPage">配置</button>
+      <button class="tab" data-page="promptsPage">提示词</button>
       <button class="tab icon-tab" id="inactiveToggle" aria-label="隐藏空闲终端" title="隐藏空闲终端"></button>
       <button class="tab icon-tab" id="cleanToggle" aria-label="清空终端显示" title="清空终端显示"></button>
       <button class="tab icon-tab" id="themeToggle" aria-label="切换颜色主题" title="切换颜色主题">☀</button>
@@ -753,14 +753,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <main>
     <section class="page active" id="activityPage">
       <section class="summary">
-        <div class="metric"><span>Running</span><strong id="runningCount">0</strong></div>
-        <div class="metric"><span>Idle Slots</span><strong id="idleCount">0</strong></div>
-        <div class="metric"><span>Recent Task</span><strong id="recentTask">-</strong></div>
-        <div class="metric"><span>Hook Events</span><strong id="eventCount">0</strong></div>
+        <div class="metric"><span>运行中</span><strong id="runningCount">0</strong></div>
+        <div class="metric"><span>空闲槽位</span><strong id="idleCount">0</strong></div>
+        <div class="metric"><span>最近任务</span><strong id="recentTask">-</strong></div>
+        <div class="metric"><span>Hook 事件</span><strong id="eventCount">0</strong></div>
       </section>
       <section class="terminal-toolbar">
         <div>
-          <h2>Agent terminals</h2>
+          <h2>代理终端</h2>
           <span class="toolbar-meta" id="terminalMeta">实时 child-agent hook 状态</span>
         </div>
       </section>
@@ -770,7 +770,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <section class="page" id="setupPage">
       <div class="setup-grid">
         <div class="setup-card">
-          <h2>API Profile</h2>
+          <h2>API 配置</h2>
           <div id="setup"></div>
           <div class="profile-tabs">
             <button class="profile-tab active" data-profile="glm">GLM</button>
@@ -780,18 +780,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="form-grid">
             <label>Provider<input id="setupProvider" value="glm"></label>
             <label>Model<input id="setupModel" value="glm-5.1"></label>
-            <label>Max concurrency<input id="setupConcurrency" value="2"></label>
-            <label>Cost hint<select id="setupCost"><option>low</option><option selected>medium</option><option>high</option><option>unknown</option></select></label>
-            <label class="wide">Anthropic-compatible base URL<input id="setupBaseUrl" value="https://open.bigmodel.cn/api/anthropic"></label>
+            <label>最大并发数<input id="setupConcurrency" value="2"></label>
+            <label>成本提示<select id="setupCost"><option>low</option><option selected>medium</option><option>high</option><option>unknown</option></select></label>
+            <label>委派可信度<select id="setupDelegationTrust"><option>high</option><option selected>medium</option><option>low</option><option>experimental</option></select></label>
+            <label class="wide">Anthropic 兼容 base URL<input id="setupBaseUrl" value="https://open.bigmodel.cn/api/anthropic"></label>
             <label class="wide">Auth token / API key<input id="setupToken" type="password" placeholder="粘贴新 key 以替换；留空则保留现有值"></label>
-            <label class="wide">Command<input id="setupCommand" value="claude -p $prompt --permission-mode $permission_mode --output-format text"></label>
-            <label class="wide">Strengths<input id="setupStrengths" value="general coding,reasoning,tests,documentation"></label>
+            <label class="wide">启动命令<input id="setupCommand" value="claude -p $prompt --permission-mode $permission_mode --output-format text"></label>
+            <label class="wide">能力标签<input id="setupStrengths" value="general coding,reasoning,tests,documentation"></label>
           </div>
-          <button id="applyProfile" class="primary-action">Apply profile to .env</button>
+          <button id="applyProfile" class="primary-action">应用到 .env</button>
           <p id="envStatus" class="subtitle"></p>
         </div>
         <div class="setup-card">
-          <h2>Applied Config Preview</h2>
+          <h2>配置预览</h2>
           <code id="configPreview" class="config-preview"></code>
         </div>
       </div>
@@ -800,21 +801,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <section class="page" id="promptsPage">
       <div class="prompt-grid">
         <div class="setup-card">
-          <h2>Prompt Console</h2>
+          <h2>提示词控制台</h2>
           <p class="prompt-note" id="promptStatus">正在加载 prompt 配置</p>
           <div class="prompt-menu">
-            <button class="prompt-tab active" data-prompt-section="primary">Primary usage</button>
-            <button class="prompt-tab" data-prompt-section="mcp">MCP tools</button>
-            <button class="prompt-tab" data-prompt-section="child">Child agent</button>
-            <button class="prompt-tab" data-prompt-section="review">Review guidance</button>
-            <button class="prompt-tab" data-prompt-section="workers">Worker profiles</button>
+            <button class="prompt-tab active" data-prompt-section="mcp">MCP 工具</button>
+            <button class="prompt-tab" data-prompt-section="child">子代理</button>
+            <button class="prompt-tab" data-prompt-section="review">审查策略</button>
           </div>
         </div>
         <div class="setup-card">
           <div id="promptEditor" class="prompt-editor"></div>
           <div class="button-row">
-            <button id="savePrompts" class="primary-action">Save prompts</button>
-            <button id="resetPromptSection">Restore section default</button>
+            <button id="savePrompts" class="primary-action">保存提示词</button>
+            <button id="resetPromptSection">恢复本节默认值</button>
           </div>
         </div>
       </div>
@@ -840,7 +839,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let currentEnv = '';
     let promptConfig = null;
     let promptDefaults = null;
-    let activePromptSection = 'primary';
+    let activePromptSection = 'mcp';
     let activeProfile = 'glm';
     const profileDefaults = {
       glm: {
@@ -849,6 +848,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         concurrency: '2',
         baseUrl: 'https://open.bigmodel.cn/api/anthropic',
         cost: 'medium',
+        delegationTrust: 'high',
         strengths: 'general coding,Chinese context,reasoning,tests,documentation'
       },
       minimax: {
@@ -857,6 +857,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         concurrency: '3',
         baseUrl: 'https://api.minimaxi.com/anthropic',
         cost: 'low',
+        delegationTrust: 'high',
         strengths: 'parallel throughput,simple edits,documentation,code search,boilerplate'
       },
       deepseek: {
@@ -865,6 +866,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         concurrency: '2',
         baseUrl: 'https://api.deepseek.com/anthropic',
         cost: 'low',
+        delegationTrust: 'medium',
         strengths: 'code search,small refactors,tests,documentation'
       }
     };
@@ -890,7 +892,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     for (const tab of document.querySelectorAll('[data-prompt-section]')) {
       tab.addEventListener('click', () => selectPromptSection(tab.dataset.promptSection));
     }
-    for (const id of ['setupProvider', 'setupModel', 'setupConcurrency', 'setupBaseUrl', 'setupToken', 'setupCommand', 'setupStrengths', 'setupCost']) {
+    for (const id of ['setupProvider', 'setupModel', 'setupConcurrency', 'setupBaseUrl', 'setupToken', 'setupCommand', 'setupStrengths', 'setupCost', 'setupDelegationTrust']) {
       document.getElementById(id).addEventListener('input', updateConfigPreview);
       document.getElementById(id).addEventListener('change', updateConfigPreview);
     }
@@ -986,12 +988,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
         token: document.getElementById('setupToken').value.trim(),
         command: document.getElementById('setupCommand').value.trim(),
         strengths: document.getElementById('setupStrengths').value.trim(),
-        cost: document.getElementById('setupCost').value
+        cost: document.getElementById('setupCost').value,
+        delegationTrust: document.getElementById('setupDelegationTrust').value
       };
     }
     function ensurePromptConfig(config = {}) {
       return {
-        primary: { usage: config.primary?.usage || '' },
         mcp: {
           list_workers: config.mcp?.list_workers || '',
           start_task: config.mcp?.start_task || '',
@@ -1004,8 +1006,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
           manifest_schema: config.child?.manifest_schema || '',
           safety_rules: config.child?.safety_rules || ''
         },
-        review: { collect_guidance: config.review?.collect_guidance || '' },
-        workers: config.workers || {}
+        review: {
+          collect_guidance: config.review?.collect_guidance || '',
+          worker_selection: config.review?.worker_selection || ''
+        }
       };
     }
     function selectPromptSection(section) {
@@ -1026,12 +1030,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         promptEditor.innerHTML = '<p class="prompt-note">Prompt 配置加载中。</p>';
         return;
       }
-      if (activePromptSection === 'primary') {
-        promptEditor.innerHTML = `
-          <p class="prompt-note">这段内容会作为长期指导提供给 primary agent，用来判断何时以及如何委派任务。</p>
-          ${promptField('Primary usage prompt', ['primary', 'usage'], { large: true })}
-        `;
-      } else if (activePromptSection === 'mcp') {
+      if (activePromptSection === 'mcp') {
         promptEditor.innerHTML = `
           <p class="prompt-note">这些描述会通过 MCP tools/list 暴露给客户端。MCP client 可能需要重新加载 tools，或重启 MCP session 后才会看到变化。</p>
           ${promptField('list_workers', ['mcp', 'list_workers'])}
@@ -1043,41 +1042,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
       } else if (activePromptSection === 'child') {
         promptEditor.innerHTML = `
           <p class="prompt-note">Child template 支持 {{goal}}, {{instruction}}, {{read_scope}}, {{write_scope}}, {{forbidden_paths}}, {{result_path}}, {{manifest_schema}}, {{safety_rules}} 和 {{context_block}}。</p>
-          ${promptField('Child agent template', ['child', 'template'], { large: true })}
-          ${promptField('Manifest schema prompt', ['child', 'manifest_schema'])}
-          ${promptField('Safety rules', ['child', 'safety_rules'])}
+          ${promptField('子代理任务模板', ['child', 'template'], { large: true })}
+          ${promptField('Manifest schema 提示词', ['child', 'manifest_schema'])}
+          ${promptField('安全规则', ['child', 'safety_rules'])}
         `;
       } else if (activePromptSection === 'review') {
         promptEditor.innerHTML = `
-          <p class="prompt-note">collect_task 返回 diff、logs、manifest 和 hook 证据后，这段内容会指导 primary agent 如何审阅结果。</p>
-          ${promptField('Collect/review guidance', ['review', 'collect_guidance'], { large: true })}
+          <p class="prompt-note">Setup/.env 是 worker metadata 的唯一事实源。这里仅编辑选择策略和证据审查原则。</p>
+          ${promptField('Worker 选择策略', ['review', 'worker_selection'], { large: true })}
+          ${promptField('回收与审查策略', ['review', 'collect_guidance'], { large: true })}
         `;
-      } else {
-        const workerIds = Array.from(new Set([
-          ...Object.keys(promptDefaults?.workers || {}),
-          ...Object.keys(promptConfig.workers || {})
-        ])).sort();
-        promptEditor.innerHTML = `
-          <p class="prompt-note">Worker profiles 会覆盖 list_workers 从 .env 暴露的描述。Strengths 在这里按行填写，保存时会写成数组。</p>
-          <div class="form-grid">
-            <label>Worker<select id="promptWorkerId">${workerIds.map(id => `<option>${esc(id)}</option>`).join('')}</select></label>
-            <label>Cost<input id="promptWorkerCost"></label>
-            <label>Speed<input id="promptWorkerSpeed"></label>
-            <label>Risk<input id="promptWorkerRisk"></label>
-            <label class="wide">Description<textarea id="promptWorkerDescription"></textarea></label>
-            <label class="wide">Strengths<textarea id="promptWorkerStrengths"></textarea></label>
-          </div>
-        `;
-        document.getElementById('promptWorkerId').addEventListener('change', loadWorkerPromptForm);
-        for (const id of ['promptWorkerCost', 'promptWorkerSpeed', 'promptWorkerRisk', 'promptWorkerDescription', 'promptWorkerStrengths']) {
-          document.getElementById(id).addEventListener('input', (event) => {
-            writeWorkerPromptForm();
-            if (event.target.tagName === 'TEXTAREA') autosizeTextarea(event.target);
-          });
-        }
-        loadWorkerPromptForm();
-        autosizeTextareas(promptEditor);
-        return;
       }
       for (const field of promptEditor.querySelectorAll('[data-prompt-path]')) {
         field.addEventListener('input', () => {
@@ -1086,28 +1060,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
         });
       }
       autosizeTextareas(promptEditor);
-    }
-    function loadWorkerPromptForm() {
-      const workerId = document.getElementById('promptWorkerId')?.value;
-      if (!workerId) return;
-      const value = { ...(promptDefaults?.workers?.[workerId] || {}), ...(promptConfig.workers?.[workerId] || {}) };
-      document.getElementById('promptWorkerDescription').value = value.description || '';
-      document.getElementById('promptWorkerStrengths').value = Array.isArray(value.strengths) ? value.strengths.join('\n') : '';
-      document.getElementById('promptWorkerCost').value = value.cost || '';
-      document.getElementById('promptWorkerSpeed').value = value.speed || '';
-      document.getElementById('promptWorkerRisk').value = value.risk || '';
-      autosizeTextareas(promptEditor);
-    }
-    function writeWorkerPromptForm() {
-      const workerId = document.getElementById('promptWorkerId')?.value;
-      if (!workerId) return;
-      promptConfig.workers[workerId] = {
-        description: document.getElementById('promptWorkerDescription').value,
-        strengths: document.getElementById('promptWorkerStrengths').value.split('\n').map(item => item.trim()).filter(Boolean),
-        cost: document.getElementById('promptWorkerCost').value,
-        speed: document.getElementById('promptWorkerSpeed').value,
-        risk: document.getElementById('promptWorkerRisk').value
-      };
     }
     function autosizeTextarea(field) {
       field.style.height = 'auto';
@@ -1131,15 +1083,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
       target[path[path.length - 1]] = value;
     }
     function copyPromptSection(source, target, section) {
-      if (section === 'workers') {
-        target.workers = JSON.parse(JSON.stringify(source.workers || {}));
-      } else {
-        target[section] = JSON.parse(JSON.stringify(source[section] || {}));
-      }
+      target[section] = JSON.parse(JSON.stringify(source[section] || {}));
     }
     async function savePrompts() {
       if (!promptConfig) return;
-      if (activePromptSection === 'workers') writeWorkerPromptForm();
       promptStatus.textContent = '正在保存 prompts';
       const response = await fetch('/api/prompts', {
         method: 'POST',
@@ -1148,7 +1095,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       });
       promptStatus.textContent = response.ok ? '已保存，将应用于新的 tool listings 和新任务' : '保存失败';
       if (response.ok) {
-        showToast('Prompts 已保存', 'MCP descriptions 会在 MCP client 重新加载 tools 或重启 MCP session 后生效。Child templates 和 worker profiles 会应用到新启动的任务。');
+        showToast('Prompts 已保存', 'MCP descriptions 会在 MCP client 重新加载 tools 或重启 MCP session 后生效。Child templates 和 review guidance 会应用到新启动的任务。');
         await loadPrompts();
       } else {
         showToast('保存失败', 'Prompt 配置未保存。请检查字段内容后重试。');
@@ -1183,6 +1130,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       document.getElementById('setupCommand').value = env.get(`SUBDISPATCH_WORKER_${key}_COMMAND`) || 'claude -p $prompt --permission-mode $permission_mode --output-format text';
       document.getElementById('setupStrengths').value = env.get(`SUBDISPATCH_WORKER_${key}_STRENGTHS`) || defaults.strengths;
       document.getElementById('setupCost').value = env.get(`SUBDISPATCH_WORKER_${key}_COST`) || defaults.cost;
+      document.getElementById('setupDelegationTrust').value = env.get(`SUBDISPATCH_WORKER_${key}_DELEGATION_TRUST`) || defaults.delegationTrust;
       envStatus.textContent = env.get(`SUBDISPATCH_WORKER_${key}_MODEL`) ? `已加载 ${provider}` : `预设 ${provider}`;
     }
     function profileLines(profile, existingEnv) {
@@ -1196,6 +1144,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         `SUBDISPATCH_WORKER_${key}_DESCRIPTION=${profile.provider} Claude Code worker.`,
         `SUBDISPATCH_WORKER_${key}_STRENGTHS=${profile.strengths}`,
         `SUBDISPATCH_WORKER_${key}_COST=${profile.cost}`,
+        `SUBDISPATCH_WORKER_${key}_DELEGATION_TRUST=${profile.delegationTrust}`,
         `SUBDISPATCH_WORKER_${key}_SPEED=unknown`,
         `SUBDISPATCH_WORKER_${key}_PERMISSION_MODE=bypassPermissions`,
         `SUBDISPATCH_WORKER_${key}_COMMAND=${profile.command}`,
@@ -1467,7 +1416,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const checks = data.checks || {};
       setupEl.innerHTML = `
         <div class="setup-status">
-          <div class="setup-status-row"><span>Status</span><strong>${esc(data.status)}</strong></div>
+          <div class="setup-status-row"><span>状态</span><strong>${esc(data.status)}</strong></div>
           <div class="setup-status-row"><span>.env</span><strong>${checks.env_exists ? '已存在' : '缺失'}</strong></div>
           <div class="setup-status-row"><span>Git</span><strong>${checks.git_available && checks.git_repo ? '就绪' : '缺失'}</strong></div>
           <div class="setup-status-row"><span>Claude</span><strong>${checks.claude_available ? '可用' : '缺失'}</strong></div>

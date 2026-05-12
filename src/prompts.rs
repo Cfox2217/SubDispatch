@@ -1,7 +1,5 @@
-use crate::config::WorkerConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,21 +8,11 @@ const MAX_PROMPTS_BYTES: usize = 128 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptConfig {
     #[serde(default)]
-    pub primary: PrimaryPrompts,
-    #[serde(default)]
     pub mcp: McpPrompts,
     #[serde(default)]
     pub child: ChildPrompts,
     #[serde(default)]
     pub review: ReviewPrompts,
-    #[serde(default)]
-    pub workers: BTreeMap<String, WorkerPrompt>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrimaryPrompts {
-    #[serde(default = "default_primary_usage")]
-    pub usage: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,38 +43,16 @@ pub struct ChildPrompts {
 pub struct ReviewPrompts {
     #[serde(default = "default_collect_guidance")]
     pub collect_guidance: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct WorkerPrompt {
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub strengths: Option<Vec<String>>,
-    #[serde(default)]
-    pub cost: Option<String>,
-    #[serde(default)]
-    pub speed: Option<String>,
-    #[serde(default)]
-    pub risk: Option<String>,
+    #[serde(default = "default_worker_selection_guidance")]
+    pub worker_selection: String,
 }
 
 impl Default for PromptConfig {
     fn default() -> Self {
         Self {
-            primary: PrimaryPrompts::default(),
             mcp: McpPrompts::default(),
             child: ChildPrompts::default(),
             review: ReviewPrompts::default(),
-            workers: BTreeMap::new(),
-        }
-    }
-}
-
-impl Default for PrimaryPrompts {
-    fn default() -> Self {
-        Self {
-            usage: default_primary_usage(),
         }
     }
 }
@@ -117,6 +83,7 @@ impl Default for ReviewPrompts {
     fn default() -> Self {
         Self {
             collect_guidance: default_collect_guidance(),
+            worker_selection: default_worker_selection_guidance(),
         }
     }
 }
@@ -173,29 +140,6 @@ pub fn save_prompt_config_from_ui(workspace: &Path, body: &str) -> Result<Value,
     }))
 }
 
-pub fn apply_worker_prompt_overrides(
-    workers: &mut BTreeMap<String, WorkerConfig>,
-    prompts: &PromptConfig,
-) {
-    for (id, prompt) in &prompts.workers {
-        let Some(worker) = workers.get_mut(id) else {
-            continue;
-        };
-        if let Some(description) = non_empty(prompt.description.as_deref()) {
-            worker.description = description.to_string();
-        }
-        if let Some(strengths) = prompt.strengths.as_ref().filter(|items| !items.is_empty()) {
-            worker.strengths = strengths.clone();
-        }
-        if let Some(cost) = non_empty(prompt.cost.as_deref()) {
-            worker.cost = cost.to_string();
-        }
-        if let Some(speed) = non_empty(prompt.speed.as_deref()) {
-            worker.speed = speed.to_string();
-        }
-    }
-}
-
 pub fn render_child_prompt(
     prompts: &PromptConfig,
     goal: &str,
@@ -244,7 +188,6 @@ fn validate_prompt_text(text: &str) -> Result<(), String> {
 
 fn validate_prompt_config(config: &PromptConfig) -> Result<(), String> {
     for (name, value) in [
-        ("primary.usage", &config.primary.usage),
         ("mcp.list_workers", &config.mcp.list_workers),
         ("mcp.start_task", &config.mcp.start_task),
         ("mcp.poll_tasks", &config.mcp.poll_tasks),
@@ -254,6 +197,7 @@ fn validate_prompt_config(config: &PromptConfig) -> Result<(), String> {
         ("child.manifest_schema", &config.child.manifest_schema),
         ("child.safety_rules", &config.child.safety_rules),
         ("review.collect_guidance", &config.review.collect_guidance),
+        ("review.worker_selection", &config.review.worker_selection),
     ] {
         if value.trim().is_empty() {
             return Err(format!("{name} must not be empty"));
@@ -272,82 +216,12 @@ fn validate_prompt_config(config: &PromptConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn default_worker_prompts() -> BTreeMap<String, WorkerPrompt> {
-    BTreeMap::from([
-        (
-            "glm".to_string(),
-            WorkerPrompt {
-                description: Some(
-                    "均衡型 Claude Code worker，适合中英文代码任务和需要较强推理的实现。"
-                        .to_string(),
-                ),
-                strengths: Some(vec![
-                    "通用编码".to_string(),
-                    "中文上下文".to_string(),
-                    "推理实现".to_string(),
-                    "测试补充".to_string(),
-                    "文档修改".to_string(),
-                ]),
-                cost: Some("medium".to_string()),
-                speed: Some("medium".to_string()),
-                risk: Some("适合边界清晰、需要较强推理的实现任务。".to_string()),
-            },
-        ),
-        (
-            "minimax".to_string(),
-            WorkerPrompt {
-                description: Some(
-                    "快速低成本 Claude Code worker，适合并行处理简单修改和局部清理。".to_string(),
-                ),
-                strengths: Some(vec![
-                    "并行吞吐".to_string(),
-                    "简单编辑".to_string(),
-                    "文档修改".to_string(),
-                    "代码搜索".to_string(),
-                    "模板代码".to_string(),
-                ]),
-                cost: Some("low".to_string()),
-                speed: Some("fast".to_string()),
-                risk: Some("避免分配宽泛架构改动或边界模糊的跨模块任务。".to_string()),
-            },
-        ),
-        (
-            "deepseek".to_string(),
-            WorkerPrompt {
-                description: Some(
-                    "低成本 Claude Code worker，适合代码搜索、小型重构和验证类任务。".to_string(),
-                ),
-                strengths: Some(vec![
-                    "代码搜索".to_string(),
-                    "小型重构".to_string(),
-                    "测试补充".to_string(),
-                    "文档修改".to_string(),
-                ]),
-                cost: Some("low".to_string()),
-                speed: Some("medium".to_string()),
-                risk: Some("任务应保持窄范围，合并前需要仔细 review diff。".to_string()),
-            },
-        ),
-    ])
-}
-
 fn default_ui_prompt_config() -> PromptConfig {
-    PromptConfig {
-        workers: default_worker_prompts(),
-        ..PromptConfig::default()
-    }
-}
-
-fn default_primary_usage() -> String {
-    "仅在任务可以交给隔离的 child coding agent，且不会阻塞你的下一步关键路径时使用 SubDispatch。调用 start_task 前，先在你自己的 branch 或 worktree 上提交 checkpoint，并保持 workspace clean。每次 start_task 只启动一个 child task；需要并行时由 primary agent 多次调用。拆分任务时尽量让 write_scope 互不重叠；根据 available slots、cost、speed 和 strengths 选择 worker；随后 poll_tasks、collect_task、review diff，并由你自己决定合并哪些改动。".to_string()
+    PromptConfig::default()
 }
 
 fn default_mcp_list_workers() -> String {
-    "列出已配置的 SubDispatch workers，包括 model hints、strengths、cost/speed hints、risk level、running tasks、queued tasks 和 available concurrency slots。委派前先调用它，用于选择合适 worker，并避免超过 provider 并发容量。".to_string()
+    "列出已配置的 SubDispatch workers，包括 model hints、strengths、cost/speed hints、delegation_trust、risk level、running tasks、queued tasks 和 available concurrency slots。委派前先调用它，用于选择合适 worker，并避免超过 provider 并发容量。delegation_trust 表示 primary agent 对该 worker 的委派倾向：high 更适合主动委派清晰任务，medium 适合窄范围任务，low/experimental 只适合低风险试验或辅助搜索。".to_string()
 }
 
 fn default_mcp_start_task() -> String {
@@ -423,10 +297,13 @@ fn default_collect_guidance() -> String {
     "collect_task 后，review changed_files、diff、scope_check、forbidden_path_check、transcript_tool_results_tail、forbidden_path_attempts_tail、logs 和 manifest。优先只采纳有价值的部分。不要让 manifest 的可信度高于 Git evidence；如果 manifest 声称测试通过，以验证命令结果和你自己的本地验证为准。接受 child result 进入 primary branch 前，先运行本地验证。".to_string()
 }
 
+fn default_worker_selection_guidance() -> String {
+    "Worker metadata 的唯一事实源是 Setup/.env。选择 worker 时，先看任务是否适配 strengths，再看 delegation_trust、available_slots、cost、speed 和 risk。边界清晰、可验证、低到中等风险的任务，应优先交给 delegation_trust 较高且成本更低的 worker；复杂架构判断、危险改动、强耦合冲突处理或敏感路径任务应由 primary agent 自己保留，或缩小 scope 后再委派。".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::WorkerConfig;
 
     #[test]
     fn child_prompt_renders_required_context() {
@@ -445,47 +322,5 @@ mod tests {
         assert!(rendered.contains("Manifest schema:"));
         assert!(rendered.contains("关键边界："));
         assert!(rendered.contains("extra context"));
-    }
-
-    #[test]
-    fn worker_prompt_overrides_are_explicit_only() {
-        let mut workers = BTreeMap::from([(
-            "glm".to_string(),
-            WorkerConfig {
-                id: "glm".to_string(),
-                command: vec!["claude".to_string()],
-                max_concurrency: 2,
-                model: Some("glm-5.1".to_string()),
-                enabled: true,
-                env: BTreeMap::new(),
-                worker_mode: "trusted-worktree".to_string(),
-                permission_mode: "bypassPermissions".to_string(),
-                description: "from env".to_string(),
-                strengths: vec!["env strength".to_string()],
-                cost: "medium".to_string(),
-                speed: "medium".to_string(),
-            },
-        )]);
-        apply_worker_prompt_overrides(&mut workers, &PromptConfig::default());
-        assert_eq!(workers["glm"].description, "from env");
-
-        let config = PromptConfig {
-            workers: BTreeMap::from([(
-                "glm".to_string(),
-                WorkerPrompt {
-                    description: Some("custom".to_string()),
-                    strengths: Some(vec!["custom strength".to_string()]),
-                    cost: Some("low".to_string()),
-                    speed: Some("fast".to_string()),
-                    risk: None,
-                },
-            )]),
-            ..PromptConfig::default()
-        };
-        apply_worker_prompt_overrides(&mut workers, &config);
-        assert_eq!(workers["glm"].description, "custom");
-        assert_eq!(workers["glm"].strengths, vec!["custom strength"]);
-        assert_eq!(workers["glm"].cost, "low");
-        assert_eq!(workers["glm"].speed, "fast");
     }
 }

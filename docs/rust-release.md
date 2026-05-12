@@ -44,6 +44,7 @@ Place `subdispatch` on `PATH`, then initialize a workspace:
 ```bash
 subdispatch init-env --workspace .
 subdispatch install --project --workspace .
+subdispatch install-skill
 subdispatch doctor --workspace .
 ```
 
@@ -53,6 +54,10 @@ for all Codex workspaces:
 ```bash
 subdispatch install --global --workspace /absolute/path/to/project
 ```
+
+The release archive includes the bundled Codex skill under
+`skills/subdispatch-delegation/SKILL.md`. `subdispatch install-skill` copies it
+to `~/.codex/skills/subdispatch-delegation/SKILL.md`.
 
 ## Web UI
 

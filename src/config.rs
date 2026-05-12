@@ -19,6 +19,7 @@ pub struct WorkerConfig {
     pub strengths: Vec<String>,
     pub cost: String,
     pub speed: String,
+    pub delegation_trust: String,
 }
 
 pub fn load_env(workspace: &Path) -> Result<BTreeMap<String, String>, String> {
@@ -123,6 +124,10 @@ fn default_claude_worker(settings: &BTreeMap<String, String>) -> Result<WorkerCo
             .get("SUBDISPATCH_CLAUDE_SPEED")
             .cloned()
             .unwrap_or_else(|| "unknown".to_string()),
+        delegation_trust: settings
+            .get("SUBDISPATCH_CLAUDE_DELEGATION_TRUST")
+            .cloned()
+            .unwrap_or_else(|| "medium".to_string()),
     })
 }
 
@@ -190,9 +195,13 @@ fn worker_from_env(
             .cloned()
             .unwrap_or_else(|| "unknown".to_string()),
         speed: settings
-            .get(&(prefix + "SPEED"))
+            .get(&(prefix.clone() + "SPEED"))
             .cloned()
             .unwrap_or_else(|| "unknown".to_string()),
+        delegation_trust: settings
+            .get(&(prefix + "DELEGATION_TRUST"))
+            .cloned()
+            .unwrap_or_else(|| "medium".to_string()),
     })
 }
 
@@ -291,6 +300,7 @@ SUBDISPATCH_CLAUDE_DESCRIPTION=Default Claude Code worker for general coding tas
 SUBDISPATCH_CLAUDE_STRENGTHS=general coding,repository edits,tests,documentation
 SUBDISPATCH_CLAUDE_COST=unknown
 SUBDISPATCH_CLAUDE_SPEED=unknown
+SUBDISPATCH_CLAUDE_DELEGATION_TRUST=medium
 
 SUBDISPATCH_CLAUDE_COMMAND=claude -p $prompt --permission-mode $permission_mode --output-format text
 # SUBDISPATCH_CLAUDE_MODEL=claude-sonnet-4-5
@@ -309,6 +319,7 @@ SUBDISPATCH_CLAUDE_MAX_CONCURRENCY=1
 # SUBDISPATCH_WORKER_GLM_STRENGTHS=general coding,Chinese context,reasoning,tests,documentation
 # SUBDISPATCH_WORKER_GLM_COST=medium
 # SUBDISPATCH_WORKER_GLM_SPEED=medium
+# SUBDISPATCH_WORKER_GLM_DELEGATION_TRUST=high
 # SUBDISPATCH_WORKER_GLM_PERMISSION_MODE=bypassPermissions
 # SUBDISPATCH_WORKER_GLM_COMMAND=claude -p $prompt --permission-mode $permission_mode --output-format text
 # SUBDISPATCH_WORKER_GLM_ENV_ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic
@@ -321,6 +332,7 @@ SUBDISPATCH_CLAUDE_MAX_CONCURRENCY=1
 # SUBDISPATCH_WORKER_MINIMAX_STRENGTHS=parallel throughput,simple edits,documentation,code search,boilerplate
 # SUBDISPATCH_WORKER_MINIMAX_COST=low
 # SUBDISPATCH_WORKER_MINIMAX_SPEED=fast
+# SUBDISPATCH_WORKER_MINIMAX_DELEGATION_TRUST=high
 # SUBDISPATCH_WORKER_MINIMAX_PERMISSION_MODE=bypassPermissions
 # SUBDISPATCH_WORKER_MINIMAX_COMMAND=claude -p $prompt --permission-mode $permission_mode --output-format text
 # SUBDISPATCH_WORKER_MINIMAX_ENV_ANTHROPIC_BASE_URL=https://api.minimaxi.com/anthropic

@@ -85,7 +85,12 @@ Returns available workers and current capacity:
 - running count
 - queued count
 - available slots
+- delegation trust
 - unavailable reason, if any
+
+`delegation_trust` is a routing hint for the primary agent. It describes how
+willing the primary agent should be to delegate a fitting task to that worker;
+it does not replace scope control, review, or validation.
 
 ### `start_task`
 
