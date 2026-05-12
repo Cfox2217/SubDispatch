@@ -1,4 +1,5 @@
 use crate::engine::SubDispatchEngine;
+use crate::prompts::{load_prompt_config, McpPrompts};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -52,7 +53,12 @@ fn handle_request(workspace: &PathBuf, request: &Value) -> Result<Option<Value>,
             "serverInfo": { "name": "subdispatch", "version": env!("CARGO_PKG_VERSION") }
         }))),
         "notifications/initialized" => Ok(None),
-        "tools/list" => Ok(Some(json!({ "tools": tool_schemas() }))),
+        "tools/list" => {
+            let prompts = load_prompt_config(workspace)?;
+            Ok(Some(
+                json!({ "tools": tool_schemas_with_prompts(&prompts.mcp) }),
+            ))
+        }
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -63,19 +69,13 @@ fn handle_request(workspace: &PathBuf, request: &Value) -> Result<Option<Value>,
             let mut engine = SubDispatchEngine::new(workspace.clone())?;
             let result = match name {
                 "list_workers" => engine.list_workers()?,
-                "init_integration" => engine.init_integration()?,
-                "start_run" => engine.start_run(arguments)?,
-                "poll_run" => {
-                    let run_id = required_arg(&arguments, "run_id")?;
-                    engine.poll_run(&run_id)?
-                }
+                "start_task" => engine.start_task(arguments)?,
+                "poll_tasks" => engine.poll_tasks(arguments)?,
                 "collect_task" => {
-                    let run_id = required_arg(&arguments, "run_id")?;
                     let task_id = required_arg(&arguments, "task_id")?;
-                    engine.collect_task(&run_id, &task_id)?
+                    engine.collect_task(&task_id)?
                 }
                 "delete_worktree" => {
-                    let run_id = required_arg(&arguments, "run_id")?;
                     let task_id = required_arg(&arguments, "task_id")?;
                     let force = arguments
                         .get("force")
@@ -85,7 +85,7 @@ fn handle_request(workspace: &PathBuf, request: &Value) -> Result<Option<Value>,
                         .get("delete_branch")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    engine.delete_worktree(&run_id, &task_id, force, delete_branch)?
+                    engine.delete_worktree(&task_id, force, delete_branch)?
                 }
                 _ => return Err(format!("Unknown tool: {name}")),
             };
@@ -130,82 +130,68 @@ fn required_arg(arguments: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required argument: {key}"))
 }
 
-pub fn tool_schemas() -> Vec<Value> {
+pub fn tool_schemas_with_prompts(prompts: &McpPrompts) -> Vec<Value> {
     vec![
         json!({
             "name": "list_workers",
-            "description": "List SubDispatch Claude Code workers and available concurrency slots.",
+            "description": prompts.list_workers,
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
-            "name": "init_integration",
-            "description": "Create or verify the persistent integration branch/worktree used as the default delegation base.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "start_run",
-            "description": "Start multiple child coding-agent tasks in isolated git worktrees. When base is omitted, tasks start from the configured integration branch HEAD.",
+            "name": "start_task",
+            "description": prompts.start_task,
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "goal": { "type": "string" },
+                    "instruction": { "type": "string" },
+                    "task_id": { "type": "string" },
+                    "worker": { "type": "string" },
                     "base": { "type": "string" },
                     "base_branch": { "type": "string" },
-                    "run_id": { "type": "string" },
-                    "tasks": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string" },
-                                "instruction": { "type": "string" },
-                                "worker": { "type": "string" },
-                                "read_scope": { "type": "array", "items": { "type": "string" } },
-                                "write_scope": { "type": "array", "items": { "type": "string" } },
-                                "forbidden_paths": { "type": "array", "items": { "type": "string" } },
-                                "context": { "type": "string" },
-                                "context_files": { "type": "array", "items": { "type": "string" } }
-                            },
-                            "required": ["id", "instruction"]
-                        }
-                    }
+                    "read_scope": { "type": "array", "items": { "type": "string" } },
+                    "write_scope": { "type": "array", "items": { "type": "string" } },
+                    "forbidden_paths": { "type": "array", "items": { "type": "string" } },
+                    "context": { "type": "string" },
+                    "context_files": { "type": "array", "items": { "type": "string" } }
                 },
-                "required": ["goal", "tasks"]
+                "required": ["instruction"]
             }
         }),
         json!({
-            "name": "poll_run",
-            "description": "Poll status for all child tasks in a SubDispatch run.",
+            "name": "poll_tasks",
+            "description": prompts.poll_tasks,
             "inputSchema": {
                 "type": "object",
-                "properties": { "run_id": { "type": "string" } },
-                "required": ["run_id"]
+                "properties": {
+                    "task_ids": { "type": "array", "items": { "type": "string" } },
+                    "status": { "type": "string" },
+                    "active_only": { "type": "boolean" }
+                }
             }
         }),
         json!({
             "name": "collect_task",
-            "description": "Collect diff, logs, manifest, and scope checks for one child task.",
+            "description": prompts.collect_task,
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "run_id": { "type": "string" },
                     "task_id": { "type": "string" }
                 },
-                "required": ["run_id", "task_id"]
+                "required": ["task_id"]
             }
         }),
         json!({
             "name": "delete_worktree",
-            "description": "Delete one SubDispatch-managed task worktree.",
+            "description": prompts.delete_worktree,
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "run_id": { "type": "string" },
                     "task_id": { "type": "string" },
                     "force": { "type": "boolean" },
                     "delete_branch": { "type": "boolean" }
                 },
-                "required": ["run_id", "task_id"]
+                "required": ["task_id"]
             }
         }),
     ]
@@ -217,7 +203,7 @@ mod tests {
 
     #[test]
     fn exposes_only_core_tools() {
-        let names = tool_schemas()
+        let names = tool_schemas_with_prompts(&McpPrompts::default())
             .into_iter()
             .map(|tool| tool["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
@@ -225,9 +211,8 @@ mod tests {
             names,
             vec![
                 "list_workers",
-                "init_integration",
-                "start_run",
-                "poll_run",
+                "start_task",
+                "poll_tasks",
                 "collect_task",
                 "delete_worktree"
             ]

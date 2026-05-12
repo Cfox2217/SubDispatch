@@ -2,6 +2,7 @@ mod config;
 mod engine;
 mod installer;
 mod mcp;
+mod prompts;
 mod web;
 
 use clap::{Parser, Subcommand};
@@ -49,33 +50,27 @@ enum Command {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
-    /// Create or verify the persistent integration branch/worktree.
-    InitIntegration {
-        #[arg(long, default_value = ".")]
-        workspace: PathBuf,
-    },
-    /// Start a run from a JSON file.
-    StartRun {
+    /// Start one delegated task from a JSON file.
+    StartTask {
         json_file: PathBuf,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
-    /// Poll one run.
-    PollRun {
-        run_id: String,
+    /// Poll delegated tasks.
+    PollTasks {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
+        #[arg(long)]
+        active_only: bool,
     },
     /// Collect one task's artifact bundle.
     CollectTask {
-        run_id: String,
         task_id: String,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
     /// Delete one managed task worktree.
     DeleteWorktree {
-        run_id: String,
         task_id: String,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
@@ -106,8 +101,6 @@ enum Command {
         events: PathBuf,
         #[arg(long)]
         summary: PathBuf,
-        #[arg(long)]
-        run_id: String,
         #[arg(long)]
         task_id: String,
     },
@@ -152,11 +145,7 @@ fn run() -> Result<(), String> {
             let engine = SubDispatchEngine::new(workspace)?;
             print_json(&engine.list_workers()?)?;
         }
-        Command::InitIntegration { workspace } => {
-            let mut engine = SubDispatchEngine::new(workspace)?;
-            print_json(&engine.init_integration()?)?;
-        }
-        Command::StartRun {
+        Command::StartTask {
             json_file,
             workspace,
         } => {
@@ -165,29 +154,27 @@ fn run() -> Result<(), String> {
             let input: Value = serde_json::from_str(&text)
                 .map_err(|err| format!("invalid JSON in {}: {err}", json_file.display()))?;
             let mut engine = SubDispatchEngine::new(workspace)?;
-            print_json(&engine.start_run(input)?)?;
+            print_json(&engine.start_task(input)?)?;
         }
-        Command::PollRun { run_id, workspace } => {
-            let mut engine = SubDispatchEngine::new(workspace)?;
-            print_json(&engine.poll_run(&run_id)?)?;
-        }
-        Command::CollectTask {
-            run_id,
-            task_id,
+        Command::PollTasks {
             workspace,
+            active_only,
         } => {
             let mut engine = SubDispatchEngine::new(workspace)?;
-            print_json(&engine.collect_task(&run_id, &task_id)?)?;
+            print_json(&engine.poll_tasks(serde_json::json!({ "active_only": active_only }))?)?;
+        }
+        Command::CollectTask { task_id, workspace } => {
+            let mut engine = SubDispatchEngine::new(workspace)?;
+            print_json(&engine.collect_task(&task_id)?)?;
         }
         Command::DeleteWorktree {
-            run_id,
             task_id,
             workspace,
             force,
             delete_branch,
         } => {
             let mut engine = SubDispatchEngine::new(workspace)?;
-            print_json(&engine.delete_worktree(&run_id, &task_id, force, delete_branch)?)?;
+            print_json(&engine.delete_worktree(&task_id, force, delete_branch)?)?;
         }
         Command::Mcp { workspace } => {
             mcp::serve_stdio(workspace)?;
@@ -201,14 +188,13 @@ fn run() -> Result<(), String> {
         Command::HookRecord {
             events,
             summary,
-            run_id,
             task_id,
         } => {
             let mut input = String::new();
             io::stdin()
                 .read_to_string(&mut input)
                 .map_err(|err| format!("failed to read hook stdin: {err}"))?;
-            engine::record_hook_event(&events, &summary, &run_id, &task_id, &input)?;
+            engine::record_hook_event(&events, &summary, &task_id, &input)?;
         }
     }
     Ok(())

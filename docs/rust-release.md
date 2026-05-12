@@ -1,6 +1,6 @@
 # Rust Release Path
 
-SubDispatch's Rust binary is the forward runtime. The packaged tool has no
+SubDispatch ships as a Rust single-binary local tool. The packaged tool has no
 Python or Node runtime dependency; runtime still requires `git`, a configured
 external code-agent CLI, and model API credentials.
 
@@ -60,17 +60,11 @@ subdispatch install --global --workspace /absolute/path/to/project
 subdispatch serve --workspace . --bind 127.0.0.1:8765
 ```
 
-The UI provides setup checks, `.env` editing, worker status, and read-only run
+The UI provides setup checks, `.env` editing, worker status, and read-only task
 activity. It does not create tasks, review diffs, merge branches, or approve
 work.
 
-## Migration Notes
+## Python Removal
 
-Python remains only as a behavior reference during the migration. Remove it
-after these Rust paths are stable:
-
-- CLI command parity for the five core task interfaces
-- MCP project/global install and doctor
-- fake-worker integration tests for worktree, artifact, and cleanup flows
-- Web Setup/Activity smoke tests
-- manual real-worker smoke test against Claude Code
+The Python MVP has been removed. See
+[python-removal-plan.md](python-removal-plan.md) for the removal record.

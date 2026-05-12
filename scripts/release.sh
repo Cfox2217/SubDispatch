@@ -17,6 +17,9 @@ cp "$ROOT/target/release/subdispatch" "$TARGET_DIR/$NAME/subdispatch"
 cp "$ROOT/README.md" "$TARGET_DIR/$NAME/README.md"
 cp "$ROOT/README_zh.md" "$TARGET_DIR/$NAME/README_zh.md"
 cp "$ROOT/.env.example" "$TARGET_DIR/$NAME/.env.example"
+if [ -d "$ROOT/skills" ]; then
+  cp -R "$ROOT/skills" "$TARGET_DIR/$NAME/skills"
+fi
 
 (
   cd "$TARGET_DIR"

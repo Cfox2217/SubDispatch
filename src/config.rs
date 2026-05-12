@@ -5,8 +5,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_INTEGRATION_BRANCH: &str = "worktree_main";
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerConfig {
     pub id: String,
@@ -298,8 +296,6 @@ SUBDISPATCH_CLAUDE_COMMAND=claude -p $prompt --permission-mode $permission_mode 
 # SUBDISPATCH_CLAUDE_MODEL=claude-sonnet-4-5
 SUBDISPATCH_CLAUDE_MAX_CONCURRENCY=1
 
-SUBDISPATCH_INTEGRATION_BRANCH=worktree_main
-
 # ANTHROPIC_API_KEY=
 # ANTHROPIC_BASE_URL=
 # ANTHROPIC_AUTH_TOKEN=
@@ -378,10 +374,5 @@ mod tests {
         );
         let err = worker_from_env("glm", &settings).unwrap_err();
         assert!(err.contains("must be greater than 0"));
-    }
-
-    #[test]
-    fn env_template_includes_integration_branch() {
-        assert!(ENV_TEMPLATE.contains("SUBDISPATCH_INTEGRATION_BRANCH=worktree_main"));
     }
 }

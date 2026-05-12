@@ -1,6 +1,7 @@
 use crate::config;
 use crate::engine::SubDispatchEngine;
 use crate::installer;
+use crate::prompts;
 use serde_json::json;
 use std::fs;
 use std::io::{Read, Write};
@@ -86,6 +87,25 @@ fn handle_connection(mut stream: TcpStream, workspace: PathBuf) -> Result<(), St
                 &serde_json::to_string_pretty(&result).map_err(|err| err.to_string())?,
             )
         }
+        ("GET", "/api/prompts") => {
+            let result = prompts::prompt_config_for_ui(&workspace)?;
+            write_response(
+                &mut stream,
+                200,
+                "application/json; charset=utf-8",
+                &serde_json::to_string_pretty(&result).map_err(|err| err.to_string())?,
+            )
+        }
+        ("POST", "/api/prompts") => {
+            let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+            let result = prompts::save_prompt_config_from_ui(&workspace, body)?;
+            write_response(
+                &mut stream,
+                200,
+                "application/json; charset=utf-8",
+                &serde_json::to_string_pretty(&result).map_err(|err| err.to_string())?,
+            )
+        }
         _ => write_response(&mut stream, 404, "text/plain; charset=utf-8", "Not found"),
     }
 }
@@ -119,7 +139,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, String> {
                 break;
             }
         }
-        if bytes.len() > 80 * 1024 {
+        if bytes.len() > 192 * 1024 {
             return Err("HTTP request is too large".to_string());
         }
     }
@@ -448,7 +468,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       box-shadow: var(--shadow);
     }
     .terminal {
-      min-height: 272px;
+      min-height: 332px;
       border: 1px solid var(--line);
       border-radius: 10px;
       background: var(--terminal-bg);
@@ -530,7 +550,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .terminal-body {
       position: relative;
       padding: 14px 16px;
-      height: 226px;
+      height: 286px;
       overflow: auto;
       background: var(--terminal-bg);
       color: var(--terminal-text);
@@ -614,6 +634,24 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     .profile-tabs { display: flex; gap: 8px; margin: 10px 0 12px; flex-wrap: wrap; }
     .profile-tab.active { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--color-sky-tint) 42%, transparent); }
+    .prompt-grid { display: grid; grid-template-columns: minmax(300px, 360px) 1fr; gap: 12px; }
+    .prompt-menu { display: grid; gap: 8px; align-content: start; }
+    .prompt-menu button { width: 100%; justify-content: flex-start; text-align: left; border-radius: 10px; }
+    .prompt-menu button.active { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--color-sky-tint) 42%, transparent); }
+    .prompt-editor { display: grid; gap: 14px; margin-bottom: 18px; }
+    .prompt-editor textarea { min-height: 0; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .prompt-editor textarea.large { min-height: 0; }
+    .prompt-note { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+    .button-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      clear: both;
+      padding-top: 14px;
+      border-top: 1px solid var(--line-soft);
+    }
+    .button-row .primary-action { width: auto; min-width: 120px; margin-top: 0; }
     .primary-action {
       width: 100%;
       height: 38px;
@@ -634,9 +672,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       white-space: pre-wrap;
     }
     textarea {
+      display: block;
       width: 100%;
-      min-height: 240px;
+      min-height: 0;
       resize: vertical;
+      overflow: hidden;
       border: 1px solid var(--color-platinum-outline);
       border-radius: 4px;
       padding: 10px;
@@ -644,6 +684,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
       background: var(--surface);
       font: inherit;
     }
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 40;
+      width: min(420px, calc(100% - 36px));
+      padding: 14px 16px;
+      border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line));
+      border-radius: 10px;
+      color: var(--text);
+      background: color-mix(in srgb, var(--surface) 96%, transparent);
+      box-shadow: var(--shadow-xl);
+      backdrop-filter: blur(16px);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity 160ms ease, transform 160ms ease;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast strong { display: block; margin-bottom: 3px; font-size: 13px; font-weight: 600; }
+    .toast span { display: block; color: var(--muted); font-size: 12px; line-height: 1.45; }
     code {
       display: block;
       overflow-wrap: anywhere;
@@ -665,6 +726,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       main { width: calc(100% - 24px); margin: 12px; padding-right: 0; }
       .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .setup-grid { grid-template-columns: 1fr; }
+      .prompt-grid { grid-template-columns: 1fr; }
       .terminal-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -675,15 +737,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="mark">SD</div>
       <div class="brand-copy">
         <h1>SubDispatch</h1>
-        <p id="updated" class="subtitle">loading</p>
+        <p id="updated" class="subtitle">加载中</p>
       </div>
     </div>
     <div class="tabs">
       <button class="tab active" data-page="activityPage">Activity</button>
       <button class="tab" data-page="setupPage">Setup</button>
-      <button class="tab icon-tab" id="inactiveToggle" aria-label="Hide inactive terminals" title="Hide inactive terminals"></button>
-      <button class="tab icon-tab" id="cleanToggle" aria-label="Clear terminal display" title="Clear terminal display"></button>
-      <button class="tab icon-tab" id="themeToggle" aria-label="Toggle color theme" title="Toggle color theme">☀</button>
+      <button class="tab" data-page="promptsPage">Prompts</button>
+      <button class="tab icon-tab" id="inactiveToggle" aria-label="隐藏空闲终端" title="隐藏空闲终端"></button>
+      <button class="tab icon-tab" id="cleanToggle" aria-label="清空终端显示" title="清空终端显示"></button>
+      <button class="tab icon-tab" id="themeToggle" aria-label="切换颜色主题" title="切换颜色主题">☀</button>
     </div>
   </nav>
 
@@ -692,13 +755,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <section class="summary">
         <div class="metric"><span>Running</span><strong id="runningCount">0</strong></div>
         <div class="metric"><span>Idle Slots</span><strong id="idleCount">0</strong></div>
-        <div class="metric"><span>Recent Run</span><strong id="recentRun">-</strong></div>
+        <div class="metric"><span>Recent Task</span><strong id="recentTask">-</strong></div>
         <div class="metric"><span>Hook Events</span><strong id="eventCount">0</strong></div>
       </section>
       <section class="terminal-toolbar">
         <div>
           <h2>Agent terminals</h2>
-          <span class="toolbar-meta" id="terminalMeta">live child-agent hook state</span>
+          <span class="toolbar-meta" id="terminalMeta">实时 child-agent hook 状态</span>
         </div>
       </section>
       <section class="terminal-grid" id="terminalWall"></section>
@@ -720,7 +783,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <label>Max concurrency<input id="setupConcurrency" value="2"></label>
             <label>Cost hint<select id="setupCost"><option>low</option><option selected>medium</option><option>high</option><option>unknown</option></select></label>
             <label class="wide">Anthropic-compatible base URL<input id="setupBaseUrl" value="https://open.bigmodel.cn/api/anthropic"></label>
-            <label class="wide">Auth token / API key<input id="setupToken" type="password" placeholder="paste key to replace, leave blank to keep existing"></label>
+            <label class="wide">Auth token / API key<input id="setupToken" type="password" placeholder="粘贴新 key 以替换；留空则保留现有值"></label>
             <label class="wide">Command<input id="setupCommand" value="claude -p $prompt --permission-mode $permission_mode --output-format text"></label>
             <label class="wide">Strengths<input id="setupStrengths" value="general coding,reasoning,tests,documentation"></label>
           </div>
@@ -734,7 +797,31 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
     </section>
 
+    <section class="page" id="promptsPage">
+      <div class="prompt-grid">
+        <div class="setup-card">
+          <h2>Prompt Console</h2>
+          <p class="prompt-note" id="promptStatus">正在加载 prompt 配置</p>
+          <div class="prompt-menu">
+            <button class="prompt-tab active" data-prompt-section="primary">Primary usage</button>
+            <button class="prompt-tab" data-prompt-section="mcp">MCP tools</button>
+            <button class="prompt-tab" data-prompt-section="child">Child agent</button>
+            <button class="prompt-tab" data-prompt-section="review">Review guidance</button>
+            <button class="prompt-tab" data-prompt-section="workers">Worker profiles</button>
+          </div>
+        </div>
+        <div class="setup-card">
+          <div id="promptEditor" class="prompt-editor"></div>
+          <div class="button-row">
+            <button id="savePrompts" class="primary-action">Save prompts</button>
+            <button id="resetPromptSection">Restore section default</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
   </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script>
     const setupEl = document.getElementById('setup');
@@ -742,12 +829,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const envStatus = document.getElementById('envStatus');
     const terminalWallEl = document.getElementById('terminalWall');
     const updatedEl = document.getElementById('updated');
+    const promptEditor = document.getElementById('promptEditor');
+    const promptStatus = document.getElementById('promptStatus');
+    const toastEl = document.getElementById('toast');
     const logs = new Map();
     const lastSeen = new Map();
     const frozen = new Set();
     const hiddenTerminals = new Set();
     let hideInactive = false;
     let currentEnv = '';
+    let promptConfig = null;
+    let promptDefaults = null;
+    let activePromptSection = 'primary';
     let activeProfile = 'glm';
     const profileDefaults = {
       glm: {
@@ -794,29 +887,42 @@ const INDEX_HTML: &str = r#"<!doctype html>
     for (const tab of document.querySelectorAll('[data-profile]')) {
       tab.addEventListener('click', () => selectProfile(tab.dataset.profile));
     }
+    for (const tab of document.querySelectorAll('[data-prompt-section]')) {
+      tab.addEventListener('click', () => selectPromptSection(tab.dataset.promptSection));
+    }
     for (const id of ['setupProvider', 'setupModel', 'setupConcurrency', 'setupBaseUrl', 'setupToken', 'setupCommand', 'setupStrengths', 'setupCost']) {
       document.getElementById(id).addEventListener('input', updateConfigPreview);
       document.getElementById(id).addEventListener('change', updateConfigPreview);
     }
     document.getElementById('applyProfile').addEventListener('click', async () => {
-      envStatus.textContent = 'applying profile';
+      envStatus.textContent = '正在应用 profile';
       const nextEnv = mergeProfileIntoEnv(currentEnv, readProfileForm());
       const response = await fetch('/api/env', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: nextEnv })
       });
-      envStatus.textContent = response.ok ? 'applied and saved' : 'apply failed';
+      envStatus.textContent = response.ok ? '已应用并保存' : '应用失败';
       if (response.ok) {
         currentEnv = nextEnv;
         await refresh(true);
       }
+    });
+    document.getElementById('savePrompts').addEventListener('click', savePrompts);
+    document.getElementById('resetPromptSection').addEventListener('click', () => {
+      if (!promptConfig || !promptDefaults) return;
+      copyPromptSection(promptDefaults, promptConfig, activePromptSection);
+      renderPromptEditor();
+      promptStatus.textContent = '已在本地恢复本节默认值，保存后生效';
     });
 
     function showPage(id) {
       for (const page of document.querySelectorAll('.page')) page.classList.toggle('active', page.id === id);
       for (const tab of document.querySelectorAll('[data-page]')) {
         tab.classList.toggle('active', tab.dataset.page === id);
+      }
+      if (id === 'promptsPage') {
+        requestAnimationFrame(() => autosizeTextareas(promptEditor));
       }
     }
     function applyTheme(theme) {
@@ -836,8 +942,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const button = document.getElementById('inactiveToggle');
       button.innerHTML = eyeIcon(hideInactive);
       button.classList.toggle('is-on', hideInactive);
-      button.setAttribute('aria-label', hideInactive ? 'Show inactive terminals' : 'Hide inactive terminals');
-      button.setAttribute('title', hideInactive ? 'Show inactive terminals' : 'Hide inactive terminals');
+      button.setAttribute('aria-label', hideInactive ? '显示空闲终端' : '隐藏空闲终端');
+      button.setAttribute('title', hideInactive ? '显示空闲终端' : '隐藏空闲终端');
     }
     function trashIcon() {
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 15h10l1-15"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
@@ -883,6 +989,179 @@ const INDEX_HTML: &str = r#"<!doctype html>
         cost: document.getElementById('setupCost').value
       };
     }
+    function ensurePromptConfig(config = {}) {
+      return {
+        primary: { usage: config.primary?.usage || '' },
+        mcp: {
+          list_workers: config.mcp?.list_workers || '',
+          start_task: config.mcp?.start_task || '',
+          poll_tasks: config.mcp?.poll_tasks || '',
+          collect_task: config.mcp?.collect_task || '',
+          delete_worktree: config.mcp?.delete_worktree || ''
+        },
+        child: {
+          template: config.child?.template || '',
+          manifest_schema: config.child?.manifest_schema || '',
+          safety_rules: config.child?.safety_rules || ''
+        },
+        review: { collect_guidance: config.review?.collect_guidance || '' },
+        workers: config.workers || {}
+      };
+    }
+    function selectPromptSection(section) {
+      activePromptSection = section;
+      for (const tab of document.querySelectorAll('[data-prompt-section]')) {
+        tab.classList.toggle('active', tab.dataset.promptSection === section);
+      }
+      renderPromptEditor();
+    }
+    function promptField(label, path, options = {}) {
+      const id = `prompt_${path.join('_')}`;
+      const value = getPath(promptConfig, path) || '';
+      const cls = options.large ? ' class="large"' : '';
+      return `<label class="wide">${esc(label)}<textarea id="${esc(id)}" data-prompt-path="${esc(path.join('.'))}"${cls}>${esc(value)}</textarea></label>`;
+    }
+    function renderPromptEditor() {
+      if (!promptConfig) {
+        promptEditor.innerHTML = '<p class="prompt-note">Prompt 配置加载中。</p>';
+        return;
+      }
+      if (activePromptSection === 'primary') {
+        promptEditor.innerHTML = `
+          <p class="prompt-note">这段内容会作为长期指导提供给 primary agent，用来判断何时以及如何委派任务。</p>
+          ${promptField('Primary usage prompt', ['primary', 'usage'], { large: true })}
+        `;
+      } else if (activePromptSection === 'mcp') {
+        promptEditor.innerHTML = `
+          <p class="prompt-note">这些描述会通过 MCP tools/list 暴露给客户端。MCP client 可能需要重新加载 tools，或重启 MCP session 后才会看到变化。</p>
+          ${promptField('list_workers', ['mcp', 'list_workers'])}
+          ${promptField('start_task', ['mcp', 'start_task'], { large: true })}
+          ${promptField('poll_tasks', ['mcp', 'poll_tasks'])}
+          ${promptField('collect_task', ['mcp', 'collect_task'])}
+          ${promptField('delete_worktree', ['mcp', 'delete_worktree'])}
+        `;
+      } else if (activePromptSection === 'child') {
+        promptEditor.innerHTML = `
+          <p class="prompt-note">Child template 支持 {{goal}}, {{instruction}}, {{read_scope}}, {{write_scope}}, {{forbidden_paths}}, {{result_path}}, {{manifest_schema}}, {{safety_rules}} 和 {{context_block}}。</p>
+          ${promptField('Child agent template', ['child', 'template'], { large: true })}
+          ${promptField('Manifest schema prompt', ['child', 'manifest_schema'])}
+          ${promptField('Safety rules', ['child', 'safety_rules'])}
+        `;
+      } else if (activePromptSection === 'review') {
+        promptEditor.innerHTML = `
+          <p class="prompt-note">collect_task 返回 diff、logs、manifest 和 hook 证据后，这段内容会指导 primary agent 如何审阅结果。</p>
+          ${promptField('Collect/review guidance', ['review', 'collect_guidance'], { large: true })}
+        `;
+      } else {
+        const workerIds = Array.from(new Set([
+          ...Object.keys(promptDefaults?.workers || {}),
+          ...Object.keys(promptConfig.workers || {})
+        ])).sort();
+        promptEditor.innerHTML = `
+          <p class="prompt-note">Worker profiles 会覆盖 list_workers 从 .env 暴露的描述。Strengths 在这里按行填写，保存时会写成数组。</p>
+          <div class="form-grid">
+            <label>Worker<select id="promptWorkerId">${workerIds.map(id => `<option>${esc(id)}</option>`).join('')}</select></label>
+            <label>Cost<input id="promptWorkerCost"></label>
+            <label>Speed<input id="promptWorkerSpeed"></label>
+            <label>Risk<input id="promptWorkerRisk"></label>
+            <label class="wide">Description<textarea id="promptWorkerDescription"></textarea></label>
+            <label class="wide">Strengths<textarea id="promptWorkerStrengths"></textarea></label>
+          </div>
+        `;
+        document.getElementById('promptWorkerId').addEventListener('change', loadWorkerPromptForm);
+        for (const id of ['promptWorkerCost', 'promptWorkerSpeed', 'promptWorkerRisk', 'promptWorkerDescription', 'promptWorkerStrengths']) {
+          document.getElementById(id).addEventListener('input', (event) => {
+            writeWorkerPromptForm();
+            if (event.target.tagName === 'TEXTAREA') autosizeTextarea(event.target);
+          });
+        }
+        loadWorkerPromptForm();
+        autosizeTextareas(promptEditor);
+        return;
+      }
+      for (const field of promptEditor.querySelectorAll('[data-prompt-path]')) {
+        field.addEventListener('input', () => {
+          setPath(promptConfig, field.dataset.promptPath.split('.'), field.value);
+          autosizeTextarea(field);
+        });
+      }
+      autosizeTextareas(promptEditor);
+    }
+    function loadWorkerPromptForm() {
+      const workerId = document.getElementById('promptWorkerId')?.value;
+      if (!workerId) return;
+      const value = { ...(promptDefaults?.workers?.[workerId] || {}), ...(promptConfig.workers?.[workerId] || {}) };
+      document.getElementById('promptWorkerDescription').value = value.description || '';
+      document.getElementById('promptWorkerStrengths').value = Array.isArray(value.strengths) ? value.strengths.join('\n') : '';
+      document.getElementById('promptWorkerCost').value = value.cost || '';
+      document.getElementById('promptWorkerSpeed').value = value.speed || '';
+      document.getElementById('promptWorkerRisk').value = value.risk || '';
+      autosizeTextareas(promptEditor);
+    }
+    function writeWorkerPromptForm() {
+      const workerId = document.getElementById('promptWorkerId')?.value;
+      if (!workerId) return;
+      promptConfig.workers[workerId] = {
+        description: document.getElementById('promptWorkerDescription').value,
+        strengths: document.getElementById('promptWorkerStrengths').value.split('\n').map(item => item.trim()).filter(Boolean),
+        cost: document.getElementById('promptWorkerCost').value,
+        speed: document.getElementById('promptWorkerSpeed').value,
+        risk: document.getElementById('promptWorkerRisk').value
+      };
+    }
+    function autosizeTextarea(field) {
+      field.style.height = 'auto';
+      field.style.height = `${Math.max(field.scrollHeight + 2, 42)}px`;
+    }
+    function autosizeTextareas(scope = document) {
+      for (const field of scope.querySelectorAll('textarea')) autosizeTextarea(field);
+    }
+    function showToast(title, message) {
+      toastEl.innerHTML = `<strong>${esc(title)}</strong><span>${esc(message)}</span>`;
+      toastEl.classList.add('show');
+      window.clearTimeout(showToast.timer);
+      showToast.timer = window.setTimeout(() => toastEl.classList.remove('show'), 6200);
+    }
+    function getPath(object, path) {
+      return path.reduce((value, key) => value && value[key], object);
+    }
+    function setPath(object, path, value) {
+      let target = object;
+      for (const key of path.slice(0, -1)) target = target[key] ||= {};
+      target[path[path.length - 1]] = value;
+    }
+    function copyPromptSection(source, target, section) {
+      if (section === 'workers') {
+        target.workers = JSON.parse(JSON.stringify(source.workers || {}));
+      } else {
+        target[section] = JSON.parse(JSON.stringify(source[section] || {}));
+      }
+    }
+    async function savePrompts() {
+      if (!promptConfig) return;
+      if (activePromptSection === 'workers') writeWorkerPromptForm();
+      promptStatus.textContent = '正在保存 prompts';
+      const response = await fetch('/api/prompts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: promptConfig })
+      });
+      promptStatus.textContent = response.ok ? '已保存，将应用于新的 tool listings 和新任务' : '保存失败';
+      if (response.ok) {
+        showToast('Prompts 已保存', 'MCP descriptions 会在 MCP client 重新加载 tools 或重启 MCP session 后生效。Child templates 和 worker profiles 会应用到新启动的任务。');
+        await loadPrompts();
+      } else {
+        showToast('保存失败', 'Prompt 配置未保存。请检查字段内容后重试。');
+      }
+    }
+    async function loadPrompts() {
+      const response = await fetch('/api/prompts');
+      const data = await response.json();
+      promptConfig = ensurePromptConfig(data.config || {});
+      promptDefaults = ensurePromptConfig(data.defaults || {});
+      promptStatus.textContent = data.exists ? `已加载 ${data.path}` : '正在使用内置默认值';
+      renderPromptEditor();
+    }
     function selectProfile(profile) {
       activeProfile = profile;
       for (const tab of document.querySelectorAll('[data-profile]')) {
@@ -904,7 +1183,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       document.getElementById('setupCommand').value = env.get(`SUBDISPATCH_WORKER_${key}_COMMAND`) || 'claude -p $prompt --permission-mode $permission_mode --output-format text';
       document.getElementById('setupStrengths').value = env.get(`SUBDISPATCH_WORKER_${key}_STRENGTHS`) || defaults.strengths;
       document.getElementById('setupCost').value = env.get(`SUBDISPATCH_WORKER_${key}_COST`) || defaults.cost;
-      envStatus.textContent = env.get(`SUBDISPATCH_WORKER_${key}_MODEL`) ? `loaded ${provider}` : `preset ${provider}`;
+      envStatus.textContent = env.get(`SUBDISPATCH_WORKER_${key}_MODEL`) ? `已加载 ${provider}` : `预设 ${provider}`;
     }
     function profileLines(profile, existingEnv) {
       const key = envKey(profile.provider);
@@ -968,16 +1247,66 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function nowTime() {
       return new Date().toLocaleTimeString();
     }
-    function taskKey(run, task) {
-      return `${run.id}/${task.id}`;
+    function taskKey(task) {
+      return task.id;
     }
     function addLog(key, html) {
       const list = logs.get(key) || [];
       list.push(`<p class="line"><span class="ts">${nowTime()}</span> ${html}</p>`);
-      logs.set(key, list.slice(-8));
+      logs.set(key, list.slice(-14));
     }
-    function observeTask(run, task) {
-      const key = taskKey(run, task);
+    function addLogBlock(key, title, text) {
+      const clean = compactText(text, 760);
+      if (!clean) return;
+      addLog(key, `<span class="dim">${esc(title)}</span> ${esc(clean)}`);
+    }
+    function compactText(text, limit = 520) {
+      const clean = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!clean) return '';
+      if (clean.length <= limit) return clean;
+      return `${clean.slice(0, limit - 1)}…`;
+    }
+    function shortCommand(command) {
+      return compactText(String(command || '').replace(/\n+/g, ' && '), 180);
+    }
+    function eventFile(event) {
+      return event?.file_path ? shortPath(event.file_path) : '';
+    }
+    function eventLine(event) {
+      const name = event?.hook_event_name || '-';
+      const tool = event?.tool_name || '-';
+      const file = eventFile(event);
+      const parts = [`event=${name}`];
+      if (tool && tool !== '-') parts.push(`tool=${tool}`);
+      if (file) parts.push(`file=${file}`);
+      if (event?.command) parts.push(`cmd="${shortCommand(event.command)}"`);
+      if (event?.duration_ms != null) parts.push(`duration=${event.duration_ms}ms`);
+      if (event?.stdout_tail) parts.push(`stdout="${compactText(event.stdout_tail, 180)}"`);
+      if (event?.stderr_tail) parts.push(`stderr="${compactText(event.stderr_tail, 180)}"`);
+      if (event?.last_assistant_message_tail) parts.push(`assistant="${compactText(event.last_assistant_message_tail, 220)}"`);
+      return parts.join(' ');
+    }
+    function latestHookLine(task) {
+      const event = task.last_event_name || '-';
+      const tool = task.last_tool_name || '-';
+      const file = task.last_file_path ? shortPath(task.last_file_path) : '';
+      const parts = [`status=${task.status || '-'}`];
+      if (event && event !== '-') parts.push(`event=${event}`);
+      if (tool && tool !== '-') parts.push(`tool=${tool}`);
+      if (file) parts.push(`file=${file}`);
+      return parts.join(' ');
+    }
+    function taskEvidenceLine(task) {
+      const parts = [];
+      parts.push(`files=${task.changed_files_count || 0}`);
+      parts.push(task.manifest_exists ? 'manifest=yes' : 'manifest=no');
+      parts.push(task.patch_exists ? 'patch=yes' : 'patch=no');
+      if (task.runtime_seconds != null) parts.push(`runtime=${task.runtime_seconds}s`);
+      if (task.status === 'running' && task.idle_seconds != null) parts.push(`idle=${task.idle_seconds}s`);
+      return parts.join(' ');
+    }
+    function observeTask(task) {
+      const key = taskKey(task);
       if (frozen.has(key)) return;
       const snapshot = JSON.stringify({
         status: task.status,
@@ -985,60 +1314,68 @@ const INDEX_HTML: &str = r#"<!doctype html>
         tool: task.last_tool_name,
         files: task.changed_files_count,
         event: task.last_event_name,
-        idle: task.idle_seconds
+        file: task.last_file_path,
+        idle: task.idle_seconds,
+        manifest: task.manifest_exists,
+        patch: task.patch_exists,
+        assistant: task.last_assistant_message_tail,
+        recent: task.recent_events
       });
       if (!lastSeen.has(key)) {
-        addLog(key, `<span class="run">start</span> ${esc(run.id)} / ${esc(task.id)}`);
-        addLog(key, `<span class="dim">worker</span> ${esc(task.worker)} <span class="dim">status</span> ${esc(task.status)}`);
+        addLog(key, `<span class="run">start</span> ${esc(task.id)} <span class="dim">on</span> ${esc(providerLabel(task.worker))}`);
+        addLogBlock(key, 'goal', task.goal || task.instruction || '');
+        addLog(key, `<span class="dim">branch</span> ${esc(task.branch || '-')} <span class="dim">worktree</span> ${esc(shortPath(task.worktree || '-'))}`);
+        for (const event of (task.recent_events || []).slice(-6)) {
+          addLog(key, `<span class="dim">hook</span> ${esc(eventLine(event))}`);
+        }
       } else if (lastSeen.get(key) !== snapshot) {
         const cls = task.status === 'running' ? 'run' : task.status === 'completed' ? 'ok' : task.status === 'failed' ? 'bad' : 'warn';
-        const idle = task.status === 'running' && task.idle_seconds != null ? ` idle=${esc(task.idle_seconds)}s` : '';
-        addLog(key, `<span class="${cls}">${esc(task.status)}</span> hook=${task.event_count || 0} tool=${esc(task.last_tool_name || '-')} files=${task.changed_files_count || 0}${idle}`);
+        addLog(key, `<span class="${cls}">${esc(task.status)}</span> ${esc(latestHookLine(task))} <span class="dim">${esc(taskEvidenceLine(task))}</span>`);
+        if (task.status !== 'completed' && task.status !== 'failed' && task.last_assistant_message_tail) {
+          addLogBlock(key, 'agent', task.last_assistant_message_tail);
+        }
       }
       if ((task.status === 'completed' || task.status === 'failed') && !String(lastSeen.get(key) || '').includes(`"final":"${task.status}"`)) {
-        addLog(key, `<span class="${task.status === 'completed' ? 'ok' : 'bad'}">end</span> exit=${esc(task.exit_code ?? 0)} runtime=${esc(task.runtime_seconds ?? 0)}s`);
+        const cls = task.status === 'completed' ? 'ok' : 'bad';
+        addLog(key, `<span class="${cls}">end</span> exit=${esc(task.exit_code ?? 0)} ${esc(taskEvidenceLine(task))}`);
+        addLogBlock(key, 'final', task.last_assistant_message_tail || task.error || '');
         frozen.add(key);
       }
       lastSeen.set(key, snapshot + ((task.status === 'completed' || task.status === 'failed') ? `,"final":"${task.status}"` : ''));
     }
-    function flattenTasks(runs) {
-      return runs.flatMap(run => (run.tasks || []).map(task => ({ run, task })));
-    }
-    function sortRuns(runs) {
-      return [...runs].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    function sortTasks(tasks) {
+      return [...tasks].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
     }
     function renderTerminals(snapshot) {
-      const runs = sortRuns(snapshot.runs || []);
-      const allTasks = flattenTasks(runs);
-      for (const { run, task } of allTasks) observeTask(run, task);
+      const allTasks = sortTasks(snapshot.tasks || []);
+      for (const task of allTasks) observeTask(task);
 
-      const running = allTasks.filter(({ task }) => task.status === 'running');
+      const running = allTasks.filter(task => task.status === 'running');
       const maxTerminals = Math.max(totalWorkerSlots(snapshot.workers || []), running.length, 1);
-      const latestRunId = runs[0]?.id;
-      const latestTasks = allTasks.filter(({ run }) => run.id === latestRunId);
+      const latestTaskId = allTasks[0]?.id;
       const recentCompleted = allTasks
-        .filter(({ task }) => task.status !== 'running')
+        .filter(task => task.status !== 'running')
         .slice(0, 6);
-      const taskTerminals = [...running, ...latestTasks, ...recentCompleted]
-        .filter((item, index, arr) => arr.findIndex(other => taskKey(other.run, other.task) === taskKey(item.run, item.task)) === index)
-        .filter(({ run, task }) => task.status === 'running' || !hiddenTerminals.has(taskKey(run, task)))
-        .filter(({ run, task }) => (logs.get(taskKey(run, task)) || []).length > 0)
-        .filter(({ task }) => !hideInactive || task.status === 'running')
+      const taskTerminals = [...running, ...recentCompleted]
+        .filter((task, index, arr) => arr.findIndex(other => taskKey(other) === taskKey(task)) === index)
+        .filter(task => task.status === 'running' || !hiddenTerminals.has(taskKey(task)))
+        .filter(task => (logs.get(taskKey(task)) || []).length > 0)
+        .filter(task => !hideInactive || task.status === 'running')
         .slice(0, maxTerminals);
       const freeSlotsNeeded = Math.max(maxTerminals - taskTerminals.length, 0);
       const freeTerminals = hideInactive ? [] : makeFreeTerminals(snapshot.workers || [], running).slice(0, freeSlotsNeeded);
       const rendered = [
-        ...taskTerminals.map((item) => renderTaskTerminal(item.run, item.task)),
+        ...taskTerminals.map((task) => renderTaskTerminal(task)),
         ...freeTerminals.map((item) => renderFreeTerminal(item))
       ].join('');
-      terminalWallEl.innerHTML = rendered || '<p class="empty-row">no active terminal output</p>';
+      terminalWallEl.innerHTML = rendered || '<p class="empty-row">暂无活跃终端输出</p>';
       stickTerminalBodiesToBottom();
 
       document.getElementById('runningCount').textContent = running.length;
       document.getElementById('idleCount').textContent = (snapshot.workers || []).reduce((sum, worker) => sum + (worker.available_slots || 0), 0);
-      document.getElementById('recentRun').textContent = latestRunId || '-';
-      document.getElementById('eventCount').textContent = taskTerminals.reduce((sum, item) => sum + (item.task.event_count || 0), 0);
-      document.getElementById('terminalMeta').textContent = hideInactive ? 'showing running terminals only' : 'showing recent terminals and free slots';
+      document.getElementById('recentTask').textContent = latestTaskId || '-';
+      document.getElementById('eventCount').textContent = taskTerminals.reduce((sum, task) => sum + (task.event_count || 0), 0);
+      document.getElementById('terminalMeta').textContent = hideInactive ? '仅显示运行中的终端' : '显示最近终端和空闲 slots';
     }
     function totalWorkerSlots(workers) {
       return workers.reduce((sum, worker) => sum + (worker.max_concurrency || 0), 0);
@@ -1050,7 +1387,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     function makeFreeTerminals(workers, runningTasks) {
       const activeByWorker = runningTasks.reduce((acc, item) => {
-        acc[item.task.worker] = (acc[item.task.worker] || 0) + 1;
+        acc[item.worker] = (acc[item.worker] || 0) + 1;
         return acc;
       }, {});
       const free = [];
@@ -1060,14 +1397,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }
       return free;
     }
-    function renderTaskTerminal(run, task) {
-      const key = taskKey(run, task);
+    function renderTaskTerminal(task) {
+      const key = taskKey(task);
       const lines = logs.get(key) || [];
       const status = task.status || 'missing';
       const provider = providerLabel(task.worker);
       const shortId = shortTaskId(task.id);
       const idle = status === 'running' && task.idle_seconds != null ? ` idle=${esc(task.idle_seconds)}s` : '';
-      const latest = `<p class="line"><span class="dim">latest</span> event=${esc(task.last_event_name || '-')} tool=${esc(task.last_tool_name || '-')} hook=${task.event_count || 0}${idle}</p>`;
+      const latest = `<p class="line"><span class="dim">now</span> ${esc(latestHookLine(task))} <span class="dim">hook=${task.event_count || 0}${idle} ${esc(taskEvidenceLine(task))}</span></p>`;
+      const taskLine = `<p class="line"><span class="dim">task</span> ${esc(compactText(task.goal || task.instruction || task.id, 220))}</p>`;
       return `
         <article class="terminal ${esc(status)}">
           <div class="terminal-head">
@@ -1078,6 +1416,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
           <div class="terminal-body">
             ${latest}
+            ${taskLine}
             ${lines.join('')}
           </div>
         </article>
@@ -1097,7 +1436,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="claude">
               <div>
                 <strong>Claude Code</strong>
-                <span>ready for delegated work</span>
+                <span>已准备好接收委派任务</span>
               </div>
             </div>
           </div>
@@ -1116,15 +1455,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (value.length <= 26) return value;
       return `${value.slice(0, 18)}...${value.slice(-5)}`;
     }
+    function shortPath(path) {
+      const value = String(path || '');
+      const marker = '/.subdispatch/worktrees/tasks/';
+      const index = value.indexOf(marker);
+      if (index >= 0) return `tasks/${value.slice(index + marker.length)}`;
+      if (value.length <= 54) return value;
+      return `...${value.slice(-51)}`;
+    }
     function renderSetup(data) {
       const checks = data.checks || {};
       setupEl.innerHTML = `
         <div class="setup-status">
           <div class="setup-status-row"><span>Status</span><strong>${esc(data.status)}</strong></div>
-          <div class="setup-status-row"><span>.env</span><strong>${checks.env_exists ? 'present' : 'missing'}</strong></div>
-          <div class="setup-status-row"><span>Git</span><strong>${checks.git_available && checks.git_repo ? 'ready' : 'missing'}</strong></div>
-          <div class="setup-status-row"><span>Claude</span><strong>${checks.claude_available ? 'available' : 'missing'}</strong></div>
-          <div class="setup-status-row"><span>MCP</span><strong>${checks.project_mcp_installed || checks.global_mcp_installed ? 'installed' : 'not installed'}</strong></div>
+          <div class="setup-status-row"><span>.env</span><strong>${checks.env_exists ? '已存在' : '缺失'}</strong></div>
+          <div class="setup-status-row"><span>Git</span><strong>${checks.git_available && checks.git_repo ? '就绪' : '缺失'}</strong></div>
+          <div class="setup-status-row"><span>Claude</span><strong>${checks.claude_available ? '可用' : '缺失'}</strong></div>
+          <div class="setup-status-row"><span>MCP</span><strong>${checks.project_mcp_installed || checks.global_mcp_installed ? '已安装' : '未安装'}</strong></div>
         </div>
         <code>${esc(data.next_step || '')}</code>
       `;
@@ -1144,9 +1491,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
         loadProfileIntoForm(activeProfile);
         updateConfigPreview();
       }
-      updatedEl.textContent = `updated ${nowTime()}`;
+      updatedEl.textContent = `更新于 ${nowTime()}`;
     }
     applyTheme(localStorage.getItem('subdispatch-theme') || 'light');
+    loadPrompts();
     refresh(true);
     setInterval(() => refresh(false), 700);
   </script>

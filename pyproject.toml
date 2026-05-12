@@ -1,9 +1,0 @@
-[project]
-name = "subdispatch"
-version = "0.2.0"
-description = "Cost-aware LLM delegation tool for SubDispatch"
-requires-python = ">=3.10"
-dependencies = []
-
-[project.scripts]
-subdispatch = "cli:main"

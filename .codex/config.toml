@@ -1,5 +1,5 @@
 [mcp_servers.subdispatch]
-command = "python"
-args = ["./subdispatch_mcp.py"]
+command = "subdispatch"
+args = ["mcp", "--workspace", "."]
 startup_timeout_sec = 10
 tool_timeout_sec = 120

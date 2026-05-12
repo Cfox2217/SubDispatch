@@ -1,4 +1,7 @@
-use crate::config::{default_workers, load_env, WorkerConfig, DEFAULT_INTEGRATION_BRANCH};
+use crate::config::{default_workers, load_env, WorkerConfig};
+use crate::prompts::{
+    apply_worker_prompt_overrides, load_prompt_config, render_child_prompt, PromptConfig,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
@@ -20,31 +23,15 @@ const STATUS_MISSING: &str = "missing";
 #[derive(Clone)]
 pub struct SubDispatchEngine {
     workspace: PathBuf,
-    runs_dir: PathBuf,
+    tasks_dir: PathBuf,
     worktrees_dir: PathBuf,
-    integration_branch: String,
     workers: BTreeMap<String, WorkerConfig>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct RunState {
-    id: String,
-    goal: String,
-    base_ref: String,
-    base_commit: String,
-    workspace: String,
-    created_at: f64,
-    #[serde(default)]
-    workspace_dirty: bool,
-    #[serde(default)]
-    workspace_dirty_summary: Vec<String>,
-    tasks: Vec<String>,
+    prompts: PromptConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TaskState {
     id: String,
-    run_id: String,
     goal: String,
     instruction: String,
     worker: String,
@@ -52,10 +39,6 @@ struct TaskState {
     branch: String,
     worktree: String,
     base_commit: String,
-    #[serde(default)]
-    workspace_dirty: bool,
-    #[serde(default)]
-    workspace_dirty_summary: Vec<String>,
     #[serde(default)]
     read_scope: Vec<String>,
     #[serde(default)]
@@ -106,19 +89,16 @@ impl SubDispatchEngine {
     pub fn new(workspace: PathBuf) -> Result<Self, String> {
         let workspace = absolute_path(&workspace)?;
         let env = load_env(&workspace)?;
-        let workers = default_workers(&env)?;
-        let integration_branch = env
-            .get("SUBDISPATCH_INTEGRATION_BRANCH")
-            .filter(|value| !value.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_INTEGRATION_BRANCH.to_string());
+        let prompts = load_prompt_config(&workspace)?;
+        let mut workers = default_workers(&env)?;
+        apply_worker_prompt_overrides(&mut workers, &prompts);
         let root = workspace.join(".subdispatch");
         Ok(Self {
-            runs_dir: root.join("runs"),
+            tasks_dir: root.join("tasks"),
             worktrees_dir: root.join("worktrees").join("tasks"),
-            integration_branch,
             workspace,
             workers,
+            prompts,
         })
     }
 
@@ -171,165 +151,126 @@ impl SubDispatchEngine {
         Ok(json!({ "status": "ok", "workers": workers }))
     }
 
-    pub fn init_integration(&mut self) -> Result<Value, String> {
+    pub fn start_task(&mut self, input: Value) -> Result<Value, String> {
         self.ensure_git_repo()?;
-        let branch = self.integration_branch.clone();
-        if !self.branch_exists(&branch) {
-            self.git(&["branch", &branch, "HEAD"])?;
-        }
-        let path = self.integration_worktree_path();
-        if !path.exists() {
-            fs::create_dir_all(path.parent().unwrap_or(&self.workspace)).map_err(|err| {
-                format!(
-                    "failed to create integration worktree parent {}: {err}",
-                    path.display()
-                )
-            })?;
-            self.git(&["worktree", "add", &path.display().to_string(), &branch])?;
-        }
-        Ok(json!({
-            "status": "ok",
-            "branch": branch,
-            "worktree": path.display().to_string(),
-            "head": self.git(&["rev-parse", &branch])?.trim(),
-            "dirty": !self.git_status_short_in(&path)?.is_empty(),
-        }))
-    }
-
-    pub fn start_run(&mut self, input: Value) -> Result<Value, String> {
-        self.ensure_git_repo()?;
-        let goal = required_string(&input, "goal")?;
-        let tasks = input
-            .get("tasks")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "start_run requires tasks array".to_string())?;
-        if tasks.is_empty() {
-            return Err("start_run requires at least one task".to_string());
-        }
-        let explicit_base = input
-            .get("base")
-            .or_else(|| input.get("base_branch"))
-            .is_some();
+        self.require_clean_workspace()?;
+        let instruction = required_string(&input, "instruction")?;
+        let goal = input
+            .get("goal")
+            .and_then(Value::as_str)
+            .unwrap_or(&instruction)
+            .to_string();
         let base_ref = input
             .get("base")
             .or_else(|| input.get("base_branch"))
             .and_then(Value::as_str)
-            .unwrap_or(&self.integration_branch)
+            .unwrap_or("HEAD")
             .to_string();
-        if !explicit_base {
-            self.require_clean_integration_branch(&base_ref)?;
-        }
         let base_commit = self.git(&["rev-parse", &base_ref])?.trim().to_string();
-        let workspace_dirty_summary = self.workspace_dirty_summary()?;
-        let workspace_dirty = !workspace_dirty_summary.is_empty();
-        let run_id = input
-            .get("run_id")
+        let task_id = input
+            .get("task_id")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
-            .unwrap_or_else(new_run_id);
-        let run_dir = self.run_dir(&run_id);
-        if run_dir.exists() {
-            return Err(format!("run already exists: {run_id}"));
+            .unwrap_or_else(new_task_id);
+        let task_dir = self.task_dir(&task_id);
+        if task_dir.exists() {
+            return Err(format!("task already exists: {task_id}"));
         }
-        fs::create_dir_all(run_dir.join("tasks"))
-            .map_err(|err| format!("failed to create run directory: {err}"))?;
-        fs::create_dir_all(self.worktrees_dir.join(&run_id))
+        let worker_id = input
+            .get("worker")
+            .and_then(Value::as_str)
+            .unwrap_or("claude-code")
+            .to_string();
+        if !self.workers.contains_key(&worker_id) {
+            return Err(format!("Unknown worker: {worker_id}"));
+        }
+        let branch = input
+            .get("branch")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("agent/{task_id}"));
+        let read_scope = string_array(&input, "read_scope");
+        let write_scope = string_array(&input, "write_scope");
+        let forbidden_paths = string_array(&input, "forbidden_paths");
+        validate_scope_contract(&read_scope, &write_scope, &forbidden_paths)?;
+        fs::create_dir_all(&task_dir)
+            .map_err(|err| format!("failed to create task directory: {err}"))?;
+        fs::create_dir_all(&self.worktrees_dir)
             .map_err(|err| format!("failed to create worktree directory: {err}"))?;
-
-        let mut run = RunState {
-            id: run_id.clone(),
-            goal: goal.clone(),
-            base_ref,
+        let worktree = self.worktrees_dir.join(&task_id);
+        self.git(&["branch", &branch, &base_commit])?;
+        self.git(&["worktree", "add", &worktree.display().to_string(), &branch])?;
+        let task = TaskState {
+            id: task_id.clone(),
+            goal,
+            instruction,
+            worker: worker_id,
+            status: STATUS_QUEUED.to_string(),
+            branch,
+            worktree: worktree.display().to_string(),
             base_commit: base_commit.clone(),
-            workspace: self.workspace.display().to_string(),
+            read_scope,
+            write_scope,
+            forbidden_paths,
+            context: input
+                .get("context")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            context_files: string_array(&input, "context_files"),
             created_at: now_secs(),
-            workspace_dirty,
-            workspace_dirty_summary: workspace_dirty_summary.clone(),
-            tasks: Vec::new(),
+            pid: None,
+            exit_code: None,
+            error: None,
+            started_at: None,
+            finished_at: None,
+            exit_path: None,
+            hook_events_path: None,
+            hook_summary_path: None,
+            command: None,
+            warning: None,
+            worktree_removed: None,
+            worktree_deleted_at: None,
         };
+        self.write_task(&task)?;
+        self.schedule_queued_tasks()?;
+        let task = self.read_task(&task_id)?;
+        Ok(json!({
+            "status": "ok",
+            "task_id": task_id,
+            "base_commit": base_commit,
+            "task": self.task_summary(&task)?
+        }))
+    }
 
-        for raw in tasks {
-            let task_id = required_string(raw, "id")?;
-            let instruction = required_string(raw, "instruction")?;
-            let worker_id = raw
-                .get("worker")
-                .and_then(Value::as_str)
-                .unwrap_or("claude-code")
-                .to_string();
-            if !self.workers.contains_key(&worker_id) {
-                return Err(format!("Unknown worker: {worker_id}"));
-            }
-            let branch = raw
-                .get("branch")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| format!("agent/{run_id}/{task_id}"));
-            let worktree = self.worktrees_dir.join(&run_id).join(&task_id);
-            self.git(&["branch", &branch, &base_commit])?;
-            self.git(&["worktree", "add", &worktree.display().to_string(), &branch])?;
-            let task = TaskState {
-                id: task_id.clone(),
-                run_id: run_id.clone(),
-                goal: goal.clone(),
-                instruction,
-                worker: worker_id,
-                status: STATUS_QUEUED.to_string(),
-                branch,
-                worktree: worktree.display().to_string(),
-                base_commit: base_commit.clone(),
-                workspace_dirty,
-                workspace_dirty_summary: workspace_dirty_summary.clone(),
-                read_scope: string_array(raw, "read_scope"),
-                write_scope: string_array(raw, "write_scope"),
-                forbidden_paths: string_array(raw, "forbidden_paths"),
-                context: raw
-                    .get("context")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                context_files: string_array(raw, "context_files"),
-                created_at: now_secs(),
-                pid: None,
-                exit_code: None,
-                error: None,
-                started_at: None,
-                finished_at: None,
-                exit_path: None,
-                hook_events_path: None,
-                hook_summary_path: None,
-                command: None,
-                warning: None,
-                worktree_removed: None,
-                worktree_deleted_at: None,
-            };
-            self.write_task(&task)?;
-            run.tasks.push(task_id);
-        }
-        self.write_run(&run)?;
-        self.schedule_queued_tasks(&run_id)?;
-        self.task_summaries(&run_id).map(|tasks| {
-            json!({
-                "status": "ok",
-                "run_id": run_id,
-                "base_commit": base_commit,
-                "tasks": tasks
+    pub fn poll_tasks(&mut self, input: Value) -> Result<Value, String> {
+        self.refresh_all_tasks()?;
+        self.schedule_queued_tasks()?;
+        self.refresh_all_tasks()?;
+        let task_ids = string_array(&input, "task_ids");
+        let status_filter = input.get("status").and_then(Value::as_str);
+        let active_only = input
+            .get("active_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let tasks = self
+            .all_tasks()?
+            .into_iter()
+            .filter(|task| task_ids.is_empty() || task_ids.contains(&task.id))
+            .filter(|task| status_filter.is_none() || Some(task.status.as_str()) == status_filter)
+            .filter(|task| {
+                !active_only || matches!(task.status.as_str(), STATUS_QUEUED | STATUS_RUNNING)
             })
-        })
+            .map(|task| self.task_summary(&task))
+            .collect::<Result<Vec<_>, _>>()?;
+        let status = tasks_status(&tasks);
+        Ok(json!({ "status": status, "tasks": tasks }))
     }
 
-    pub fn poll_run(&mut self, run_id: &str) -> Result<Value, String> {
-        self.refresh_run(run_id)?;
-        self.schedule_queued_tasks(run_id)?;
-        self.refresh_run(run_id)?;
-        let tasks = self.task_summaries(run_id)?;
-        let status = run_status(&tasks);
-        Ok(json!({ "status": status, "run_id": run_id, "tasks": tasks }))
-    }
-
-    pub fn collect_task(&mut self, run_id: &str, task_id: &str) -> Result<Value, String> {
-        self.refresh_task(run_id, task_id)?;
-        let task = self.read_task(run_id, task_id)?;
-        let task_dir = self.task_dir(run_id, task_id);
+    pub fn collect_task(&mut self, task_id: &str) -> Result<Value, String> {
+        self.refresh_task(task_id)?;
+        let task = self.read_task(task_id)?;
+        let task_dir = self.task_dir(task_id);
         let worktree = PathBuf::from(&task.worktree);
         let changed_files = self.changed_files(&task)?;
         let diff = self.task_diff(&task)?;
@@ -339,7 +280,6 @@ impl SubDispatchEngine {
         let manifest_path = worktree.join(".subdispatch").join("result.json");
         let manifest = read_json_optional(&manifest_path)?;
         let artifact = json!({
-            "run_id": run_id,
             "task_id": task_id,
             "status": task.status,
             "instruction": task.instruction,
@@ -347,8 +287,6 @@ impl SubDispatchEngine {
             "base_commit": task.base_commit,
             "branch": task.branch,
             "worktree": task.worktree,
-            "workspace_dirty": task.workspace_dirty,
-            "workspace_dirty_summary": task.workspace_dirty_summary,
             "changed_files": changed_files,
             "diff": diff,
             "patch_path": patch_path.display().to_string(),
@@ -356,8 +294,10 @@ impl SubDispatchEngine {
             "stdout_tail": tail(&task_dir.join("stdout.log"), 4000)?,
             "stderr_tail": tail(&task_dir.join("stderr.log"), 4000)?,
             "hook_summary": self.hook_summary(&task)?,
-            "hook_events_tail": self.hook_events_tail(&task, 20)?,
-            "transcript_tail": self.transcript_tail(&task, 8000)?,
+            "hook_events_tail": self.hook_events_tail(&task, 8)?,
+            "transcript_tool_results_tail": self.transcript_tool_results_tail(&task, 4, 2000)?,
+            "forbidden_path_attempts_tail": self.forbidden_path_attempts_tail(&task, 8)?,
+            "transcript_tail": self.transcript_tail(&task, 2000)?,
             "scope_check": scope_check(&changed_files, &task.write_scope),
             "forbidden_path_check": forbidden_path_check(&changed_files, &task.forbidden_paths),
         });
@@ -367,18 +307,17 @@ impl SubDispatchEngine {
 
     pub fn delete_worktree(
         &mut self,
-        run_id: &str,
         task_id: &str,
         force: bool,
         delete_branch: bool,
     ) -> Result<Value, String> {
-        self.refresh_task(run_id, task_id)?;
-        let mut task = self.read_task(run_id, task_id)?;
+        self.refresh_task(task_id)?;
+        let mut task = self.read_task(task_id)?;
         if task.status == STATUS_RUNNING && !force {
             return Err("Refusing to delete running task worktree without force=true".to_string());
         }
         let worktree = absolute_path(Path::new(&task.worktree))?;
-        let managed_root = absolute_path(&self.worktrees_dir.join(run_id))?;
+        let managed_root = absolute_path(&self.worktrees_dir)?;
         if !worktree.starts_with(&managed_root) {
             return Err(format!(
                 "Refusing to delete unmanaged worktree: {}",
@@ -405,52 +344,34 @@ impl SubDispatchEngine {
         self.write_task(&task)?;
         Ok(json!({
             "status": "ok",
-            "run_id": run_id,
             "task_id": task_id,
             "worktree_removed": removed,
             "branch_deleted": branch_deleted,
-            "artifact_dir": self.task_dir(run_id, task_id).display().to_string(),
+            "artifact_dir": self.task_dir(task_id).display().to_string(),
         }))
     }
 
     pub fn activity_snapshot(&mut self) -> Result<Value, String> {
-        let mut runs = Vec::new();
-        if self.runs_dir.exists() {
-            for entry in fs::read_dir(&self.runs_dir)
-                .map_err(|err| format!("failed to read {}: {err}", self.runs_dir.display()))?
-            {
-                let entry = entry.map_err(|err| format!("failed to read run entry: {err}"))?;
-                if entry.path().join("run.json").exists() {
-                    let run: RunState = read_json(&entry.path().join("run.json"))?;
-                    let _ = self.refresh_run(&run.id);
-                    let tasks = self.task_summaries(&run.id)?;
-                    runs.push(json!({
-                        "id": run.id,
-                        "goal": run.goal,
-                        "base_commit": run.base_commit,
-                        "created_at": run.created_at,
-                        "workspace_dirty": run.workspace_dirty,
-                        "workspace_dirty_summary": run.workspace_dirty_summary,
-                        "status": run_status(&tasks),
-                        "tasks": tasks,
-                    }));
-                }
-            }
-        }
+        self.refresh_all_tasks()?;
+        self.schedule_queued_tasks()?;
+        self.refresh_all_tasks()?;
+        let tasks = self
+            .all_tasks()?
+            .into_iter()
+            .map(|task| self.task_summary(&task))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(json!({
             "status": "ok",
             "workspace": self.workspace.display().to_string(),
             "workers": self.list_workers()?.get("workers").cloned().unwrap_or_else(|| json!([])),
-            "runs": runs,
+            "tasks": tasks,
         }))
     }
 
-    fn schedule_queued_tasks(&mut self, run_id: &str) -> Result<(), String> {
-        self.refresh_run(run_id)?;
+    fn schedule_queued_tasks(&mut self) -> Result<(), String> {
+        self.refresh_all_tasks()?;
         let mut running_counts = self.running_counts_by_worker()?;
-        let run = self.read_run(run_id)?;
-        for task_id in run.tasks {
-            let mut task = self.read_task(run_id, &task_id)?;
+        for mut task in self.all_tasks()? {
             if task.status != STATUS_QUEUED {
                 continue;
             }
@@ -478,7 +399,7 @@ impl SubDispatchEngine {
         task: &mut TaskState,
         worker: &WorkerConfig,
     ) -> Result<(), String> {
-        let task_dir = self.task_dir(&task.run_id, &task.id);
+        let task_dir = self.task_dir(&task.id);
         fs::create_dir_all(&task_dir)
             .map_err(|err| format!("failed to create {}: {err}", task_dir.display()))?;
         let prompt_path = task_dir.join("prompt.txt");
@@ -521,7 +442,6 @@ impl SubDispatchEngine {
             .arg(&launch_path)
             .current_dir(&self.workspace)
             .envs(&worker.env)
-            .env("SUBDISPATCH_RUN_ID", &task.run_id)
             .env("SUBDISPATCH_TASK_ID", &task.id)
             .env("SUBDISPATCH_RESULT_PATH", &result_path)
             .env("SUBDISPATCH_PROMPT_PATH", &prompt_path)
@@ -561,9 +481,7 @@ impl SubDispatchEngine {
         fs::create_dir_all(claude_dir.join("hooks"))
             .map_err(|err| format!("failed to create Claude hook directory: {err}"))?;
         let settings_path = claude_dir.join("settings.local.json");
-        let backup_path = self
-            .task_dir(&task.run_id, &task.id)
-            .join("settings.local.json.backup");
+        let backup_path = self.task_dir(&task.id).join("settings.local.json.backup");
         if settings_path.exists() && !backup_path.exists() {
             fs::copy(&settings_path, &backup_path).map_err(|err| {
                 format!(
@@ -576,11 +494,10 @@ impl SubDispatchEngine {
         let exe = env::current_exe()
             .map_err(|err| format!("failed to locate current executable: {err}"))?;
         let command = format!(
-            "{} hook-record --events {} --summary {} --run-id {} --task-id {}",
+            "{} hook-record --events {} --summary {} --task-id {}",
             shell_quote(&exe.display().to_string()),
             shell_quote(&hook_events_path.display().to_string()),
             shell_quote(&hook_summary_path.display().to_string()),
-            shell_quote(&task.run_id),
             shell_quote(&task.id),
         );
         let mut hooks = serde_json::Map::new();
@@ -612,16 +529,15 @@ impl SubDispatchEngine {
         )
     }
 
-    fn refresh_run(&mut self, run_id: &str) -> Result<(), String> {
-        let run = self.read_run(run_id)?;
-        for task_id in run.tasks {
-            self.refresh_task(run_id, &task_id)?;
+    fn refresh_all_tasks(&mut self) -> Result<(), String> {
+        for task in self.all_tasks()? {
+            self.refresh_task(&task.id)?;
         }
         Ok(())
     }
 
-    fn refresh_task(&mut self, run_id: &str, task_id: &str) -> Result<(), String> {
-        let mut task = self.read_task(run_id, task_id)?;
+    fn refresh_task(&mut self, task_id: &str) -> Result<(), String> {
+        let mut task = self.read_task(task_id)?;
         if task.status != STATUS_RUNNING {
             return Ok(());
         }
@@ -656,7 +572,7 @@ impl SubDispatchEngine {
             .exit_path
             .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| self.task_dir(&task.run_id, &task.id).join("exit.json"));
+            .unwrap_or_else(|| self.task_dir(&task.id).join("exit.json"));
         if !path.exists() {
             return Ok(None);
         }
@@ -689,118 +605,95 @@ impl SubDispatchEngine {
 
     fn all_tasks(&self) -> Result<Vec<TaskState>, String> {
         let mut tasks = Vec::new();
-        if !self.runs_dir.exists() {
+        if !self.tasks_dir.exists() {
             return Ok(tasks);
         }
-        for run_entry in fs::read_dir(&self.runs_dir)
-            .map_err(|err| format!("failed to read {}: {err}", self.runs_dir.display()))?
+        for task_entry in fs::read_dir(&self.tasks_dir)
+            .map_err(|err| format!("failed to read {}: {err}", self.tasks_dir.display()))?
         {
-            let run_entry = run_entry.map_err(|err| format!("failed to read run entry: {err}"))?;
-            let tasks_dir = run_entry.path().join("tasks");
-            if !tasks_dir.exists() {
-                continue;
-            }
-            for task_entry in fs::read_dir(&tasks_dir)
-                .map_err(|err| format!("failed to read {}: {err}", tasks_dir.display()))?
-            {
-                let task_entry =
-                    task_entry.map_err(|err| format!("failed to read task entry: {err}"))?;
-                let task_path = task_entry.path().join("task.json");
-                if task_path.exists() {
-                    if let Ok(task) = read_json(&task_path) {
-                        tasks.push(task);
-                    }
+            let task_entry =
+                task_entry.map_err(|err| format!("failed to read task entry: {err}"))?;
+            let task_path = task_entry.path().join("task.json");
+            if task_path.exists() {
+                if let Ok(task) = read_json(&task_path) {
+                    tasks.push(task);
                 }
             }
         }
         Ok(tasks)
     }
 
-    fn task_summaries(&self, run_id: &str) -> Result<Vec<Value>, String> {
-        let run = self.read_run(run_id)?;
-        let mut summaries = Vec::new();
-        for task_id in run.tasks {
-            let task = self.read_task(run_id, &task_id)?;
-            let hook_summary = self.hook_summary(&task)?;
-            let now = now_secs();
-            let runtime_seconds = task.started_at.map(|started| {
-                ((task.finished_at.unwrap_or(now) - started).max(0.0)).floor() as u64
-            });
-            let last_event_at = hook_summary.get("last_event_at").and_then(Value::as_f64);
-            let idle_seconds = if task.status == STATUS_RUNNING {
-                last_event_at
-                    .or(task.started_at)
-                    .map(|last_activity| ((now - last_activity).max(0.0)).floor() as u64)
-            } else {
-                None
-            };
-            let worktree = PathBuf::from(&task.worktree);
-            let changed_files_count = if worktree.exists() {
-                self.changed_files(&task)?.len()
-            } else {
-                0
-            };
-            summaries.push(json!({
-                "id": task.id,
-                "status": task.status,
-                "worker": task.worker,
-                "pid": task.pid,
-                "exit_code": task.exit_code,
-                "runtime_seconds": runtime_seconds,
-                "branch": task.branch,
-                "worktree": task.worktree,
-                "workspace_dirty": task.workspace_dirty,
-                "workspace_dirty_summary": task.workspace_dirty_summary,
-                "worktree_exists": worktree.exists(),
-                "branch_exists": self.branch_exists(&task.branch),
-                "manifest_exists": worktree.join(".subdispatch").join("result.json").exists(),
-                "changed_files_count": changed_files_count,
-                "last_event_at": hook_summary.get("last_event_at").cloned(),
-                "idle_seconds": idle_seconds,
-                "last_event_name": hook_summary.get("last_event_name").cloned(),
-                "event_count": hook_summary.get("event_count").and_then(Value::as_u64).unwrap_or(0),
-                "transcript_path": hook_summary.get("transcript_path").cloned(),
-                "agent_transcript_path": hook_summary.get("agent_transcript_path").cloned(),
-                "last_tool_name": hook_summary.get("last_tool_name").cloned(),
-                "last_assistant_message_tail": hook_summary.get("last_assistant_message_tail").cloned(),
-                "error": task.error,
-            }));
-        }
-        Ok(summaries)
+    fn task_summary(&self, task: &TaskState) -> Result<Value, String> {
+        let hook_summary = self.hook_summary(task)?;
+        let now = now_secs();
+        let runtime_seconds = task
+            .started_at
+            .map(|started| ((task.finished_at.unwrap_or(now) - started).max(0.0)).floor() as u64);
+        let last_event_at = hook_summary.get("last_event_at").and_then(Value::as_f64);
+        let idle_seconds = if task.status == STATUS_RUNNING {
+            last_event_at
+                .or(task.started_at)
+                .map(|last_activity| ((now - last_activity).max(0.0)).floor() as u64)
+        } else {
+            None
+        };
+        let worktree = PathBuf::from(&task.worktree);
+        let task_dir = self.task_dir(&task.id);
+        let artifact_path = task_dir.join("artifact.json");
+        let patch_path = task_dir.join("diff.patch");
+        let worktree_manifest_path = worktree.join(".subdispatch").join("result.json");
+        let changed_files_count = if worktree.exists() {
+            self.changed_files(task)?.len()
+        } else {
+            artifact_changed_files_count(&artifact_path).unwrap_or(0)
+        };
+        let manifest_exists =
+            worktree_manifest_path.exists() || artifact_manifest_exists(&artifact_path);
+        Ok(json!({
+            "id": task.id,
+            "task_id": task.id,
+            "goal": task.goal,
+            "instruction": task.instruction,
+            "status": task.status,
+            "worker": task.worker,
+            "created_at": task.created_at,
+            "pid": task.pid,
+            "exit_code": task.exit_code,
+            "runtime_seconds": runtime_seconds,
+            "branch": task.branch,
+            "worktree": task.worktree,
+            "worktree_exists": worktree.exists(),
+            "branch_exists": self.branch_exists(&task.branch),
+            "manifest_exists": manifest_exists,
+            "artifact_exists": artifact_path.exists(),
+            "patch_exists": patch_path.exists(),
+            "changed_files_count": changed_files_count,
+            "last_event_at": hook_summary.get("last_event_at").cloned(),
+            "idle_seconds": idle_seconds,
+            "last_event_name": hook_summary.get("last_event_name").cloned(),
+            "event_count": hook_summary.get("event_count").and_then(Value::as_u64).unwrap_or(0),
+            "recent_events": self.hook_events_tail(task, 8)?,
+            "transcript_path": hook_summary.get("transcript_path").cloned(),
+            "agent_transcript_path": hook_summary.get("agent_transcript_path").cloned(),
+            "last_tool_name": hook_summary.get("last_tool_name").cloned(),
+            "last_file_path": hook_summary.get("last_file_path").cloned(),
+            "last_assistant_message_tail": hook_summary.get("last_assistant_message_tail").cloned(),
+            "error": task.error,
+        }))
     }
 
     fn render_prompt(&self, task: &TaskState, result_path: &Path) -> Result<String, String> {
-        let mut lines = vec![
-            "You are a SubDispatch child coding agent working in an isolated git worktree."
-                .to_string(),
-            format!("Goal: {}", task.goal),
-            format!("Task: {}", task.instruction),
-            format!("Read scope: {:?}", task.read_scope),
-            format!("Write scope: {:?}", task.write_scope),
-            format!("Forbidden paths: {:?}", task.forbidden_paths),
-            format!("Write a JSON result manifest to: {}", result_path.display()),
-            "Do not modify any worktree outside the current directory.".to_string(),
-            "Do not read or modify secrets, home directory files, or unrelated repositories."
-                .to_string(),
-            "Do not run destructive commands such as rm -rf, git reset --hard, or force pushes."
-                .to_string(),
-            "Do not merge, push, or delete branches.".to_string(),
-        ];
-        if task.workspace_dirty {
-            lines.push(String::new());
-            lines.push("Important workspace state: this task worktree was created from the recorded base commit, but the primary workspace had uncommitted changes when the run started. Those changes are not present in this worktree unless they are also included below as primary-agent supplied context. Do not assume absent files or old code mean the primary workspace lacks newer uncommitted work.".to_string());
-            lines.push("Primary workspace dirty summary:".to_string());
-            for item in &task.workspace_dirty_summary {
-                lines.push(format!("- {item}"));
-            }
-        }
         let context = self.task_context(task)?;
-        if !context.is_empty() {
-            lines.push(String::new());
-            lines.push("Primary-agent supplied context follows. Treat it as authoritative even if the worktree files differ.".to_string());
-            lines.push(context);
-        }
-        Ok(lines.join("\n"))
+        Ok(render_child_prompt(
+            &self.prompts,
+            &task.goal,
+            &task.instruction,
+            &task.read_scope,
+            &task.write_scope,
+            &task.forbidden_paths,
+            result_path,
+            &context,
+        ))
     }
 
     fn task_context(&self, task: &TaskState) -> Result<String, String> {
@@ -913,10 +806,7 @@ impl SubDispatchEngine {
             .hook_summary_path
             .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                self.task_dir(&task.run_id, &task.id)
-                    .join("hook_summary.json")
-            });
+            .unwrap_or_else(|| self.task_dir(&task.id).join("hook_summary.json"));
         read_json_optional(&path).map(|value| value.unwrap_or_else(|| json!({})))
     }
 
@@ -925,10 +815,7 @@ impl SubDispatchEngine {
             .hook_events_path
             .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                self.task_dir(&task.run_id, &task.id)
-                    .join("hook_events.jsonl")
-            });
+            .unwrap_or_else(|| self.task_dir(&task.id).join("hook_events.jsonl"));
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -941,23 +828,93 @@ impl SubDispatchEngine {
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
-            .map(|line| {
-                serde_json::from_str(line)
-                    .unwrap_or_else(|_| json!({ "error": "invalid hook event json", "raw": line }))
-            })
+            .map(compact_hook_event_line)
             .collect())
     }
 
     fn transcript_tail(&self, task: &TaskState, limit: usize) -> Result<String, String> {
-        let summary = self.hook_summary(task)?;
-        let Some(path) = summary
-            .get("agent_transcript_path")
-            .or_else(|| summary.get("transcript_path"))
-            .and_then(Value::as_str)
-        else {
+        let Some(path) = self.transcript_path(task)? else {
             return Ok(String::new());
         };
-        tail(&expand_home(path), limit)
+        tail(&expand_home(&path), limit)
+    }
+
+    fn transcript_tool_results_tail(
+        &self,
+        task: &TaskState,
+        count: usize,
+        chars_per_result: usize,
+    ) -> Result<Vec<Value>, String> {
+        let Some(path) = self.transcript_path(task)? else {
+            return Ok(Vec::new());
+        };
+        let path = expand_home(&path);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let text = fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let tool_uses = transcript_tool_uses(&text);
+        let results = text
+            .lines()
+            .filter_map(|line| compact_transcript_tool_result_line(line, &tool_uses))
+            .rev()
+            .collect::<Vec<_>>();
+        let mut selected = results
+            .iter()
+            .filter(|value| is_verification_tool_result(value))
+            .take(count)
+            .cloned()
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            selected = results.into_iter().take(count).collect();
+        }
+        Ok(selected
+            .into_iter()
+            .rev()
+            .map(|mut value| {
+                trim_tool_result_content(&mut value, chars_per_result);
+                value
+            })
+            .collect())
+    }
+
+    fn forbidden_path_attempts_tail(
+        &self,
+        task: &TaskState,
+        limit: usize,
+    ) -> Result<Vec<Value>, String> {
+        if task.forbidden_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = task
+            .hook_events_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.task_dir(&task.id).join("hook_events.jsonl"));
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let text = fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        Ok(text
+            .lines()
+            .filter_map(|line| compact_forbidden_attempt_line(line, &task.forbidden_paths))
+            .rev()
+            .take(limit)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect())
+    }
+
+    fn transcript_path(&self, task: &TaskState) -> Result<Option<String>, String> {
+        let summary = self.hook_summary(task)?;
+        Ok(summary
+            .get("agent_transcript_path")
+            .and_then(Value::as_str)
+            .or_else(|| summary.get("transcript_path").and_then(Value::as_str))
+            .map(ToOwned::to_owned))
     }
 
     fn branch_exists(&self, branch: &str) -> bool {
@@ -977,109 +934,28 @@ impl SubDispatchEngine {
         run_command("git", args, cwd)
     }
 
-    fn require_clean_integration_branch(&self, branch: &str) -> Result<(), String> {
-        if !self.branch_exists(branch) {
-            return Err(format!(
-                "integration branch {branch:?} does not exist. Run `subdispatch init-integration --workspace {}` or pass an explicit base.",
-                self.workspace.display()
-            ));
-        }
-        let worktree = self.find_worktree_for_branch(branch)?;
-        let status = self.git_status_short_in(&worktree)?;
+    fn require_clean_workspace(&self) -> Result<(), String> {
+        let status = self.git_status_short_in(&self.workspace)?;
         if !status.is_empty() {
-            return Err(format!(
-                "integration branch {branch:?} has uncommitted changes in {}. Commit a checkpoint before delegating, or pass an explicit base.",
-                worktree.display()
-            ));
+            return Err("workspace has uncommitted changes. Commit a checkpoint before delegating so child worktrees start from a real HEAD.".to_string());
         }
         Ok(())
-    }
-
-    fn find_worktree_for_branch(&self, branch: &str) -> Result<PathBuf, String> {
-        let output = self.git(&["worktree", "list", "--porcelain"])?;
-        let mut current_path: Option<PathBuf> = None;
-        for line in output.lines() {
-            if let Some(path) = line.strip_prefix("worktree ") {
-                current_path = Some(PathBuf::from(path));
-            } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
-                if value == branch {
-                    if let Some(path) = current_path {
-                        return Ok(path);
-                    }
-                }
-            }
-        }
-        Err(format!(
-            "integration branch {branch:?} has no checked-out worktree. Run `subdispatch init-integration --workspace {}`.",
-            self.workspace.display()
-        ))
-    }
-
-    fn integration_worktree_path(&self) -> PathBuf {
-        let project = self
-            .workspace
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(safe_path_component)
-            .unwrap_or_else(|| "workspace".to_string());
-        self.workspace
-            .join(".subdispatch")
-            .join("worktrees")
-            .join("integration")
-            .join(project)
-            .join(&self.integration_branch)
     }
 
     fn git_status_short_in(&self, cwd: &Path) -> Result<String, String> {
         self.git_in(cwd, &["status", "--short"])
     }
 
-    fn workspace_dirty_summary(&self) -> Result<Vec<String>, String> {
-        let status = self.git(&["status", "--short"])?;
-        Ok(status
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .filter(|line| !is_sensitive_status_line(line))
-            .take(80)
-            .map(ToOwned::to_owned)
-            .collect())
+    fn task_dir(&self, task_id: &str) -> PathBuf {
+        self.tasks_dir.join(task_id)
     }
 
-    fn run_dir(&self, run_id: &str) -> PathBuf {
-        self.runs_dir.join(run_id)
-    }
-
-    fn task_dir(&self, run_id: &str, task_id: &str) -> PathBuf {
-        self.run_dir(run_id).join("tasks").join(task_id)
-    }
-
-    fn read_run(&self, run_id: &str) -> Result<RunState, String> {
-        read_json(&self.run_dir(run_id).join("run.json"))
-    }
-
-    fn write_run(&self, run: &RunState) -> Result<(), String> {
-        write_json(&self.run_dir(&run.id).join("run.json"), run)
-    }
-
-    fn read_task(&self, run_id: &str, task_id: &str) -> Result<TaskState, String> {
-        let mut task: TaskState = read_json(&self.task_dir(run_id, task_id).join("task.json"))?;
-        if !task.workspace_dirty && task.workspace_dirty_summary.is_empty() {
-            if let Ok(run) = self.read_run(run_id) {
-                if run.workspace_dirty {
-                    task.workspace_dirty = true;
-                    task.workspace_dirty_summary = run.workspace_dirty_summary;
-                }
-            }
-        }
-        Ok(task)
+    fn read_task(&self, task_id: &str) -> Result<TaskState, String> {
+        read_json(&self.task_dir(task_id).join("task.json"))
     }
 
     fn write_task(&self, task: &TaskState) -> Result<(), String> {
-        write_json(
-            &self.task_dir(&task.run_id, &task.id).join("task.json"),
-            task,
-        )
+        write_json(&self.task_dir(&task.id).join("task.json"), task)
     }
 }
 
@@ -1120,7 +996,6 @@ pub fn supervise(launch_json: &Path) -> Result<(), String> {
 pub fn record_hook_event(
     events: &Path,
     summary: &Path,
-    run_id: &str,
     task_id: &str,
     input: &str,
 ) -> Result<(), String> {
@@ -1133,7 +1008,6 @@ pub fn record_hook_event(
     let recorded_at = now_secs();
     let event = json!({
         "recorded_at": recorded_at,
-        "run_id": run_id,
         "task_id": task_id,
         "hook_event_name": payload.get("hook_event_name"),
         "session_id": payload.get("session_id"),
@@ -1147,6 +1021,10 @@ pub fn record_hook_event(
         "last_assistant_message": payload.get("last_assistant_message"),
         "raw": payload,
     });
+    let tool_input = event
+        .pointer("/raw/tool_input")
+        .or_else(|| event.get("tool_input"));
+    let file_path = compact_event_file_path(&event, tool_input);
     if let Some(parent) = events.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
@@ -1169,7 +1047,6 @@ pub fn record_hook_event(
     write_json(
         summary,
         &json!({
-            "run_id": run_id,
             "task_id": task_id,
             "event_count": previous.get("event_count").and_then(Value::as_u64).unwrap_or(0) + 1,
             "last_event_at": recorded_at,
@@ -1178,6 +1055,7 @@ pub fn record_hook_event(
             "transcript_path": event.get("transcript_path").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| previous.get("transcript_path").cloned().unwrap_or(Value::Null)),
             "agent_transcript_path": event.get("agent_transcript_path").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| previous.get("agent_transcript_path").cloned().unwrap_or(Value::Null)),
             "last_tool_name": event.get("tool_name").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| previous.get("last_tool_name").cloned().unwrap_or(Value::Null)),
+            "last_file_path": if file_path.is_null() { previous.get("last_file_path").cloned().unwrap_or(Value::Null) } else { file_path },
             "last_cwd": event.get("cwd").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| previous.get("last_cwd").cloned().unwrap_or(Value::Null)),
             "last_reason": event.get("reason").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| previous.get("last_reason").cloned().unwrap_or(Value::Null)),
             "last_assistant_message_tail": tail.map(Value::String).unwrap_or_else(|| previous.get("last_assistant_message_tail").cloned().unwrap_or(Value::Null)),
@@ -1198,7 +1076,6 @@ fn substitute_template(
         .replace("$permission_mode", &worker.permission_mode)
         .replace("$worker_mode", &worker.worker_mode)
         .replace("$task_id", &task.id)
-        .replace("$run_id", &task.run_id)
         .replace("$worktree", &task.worktree)
         .replace("$model", worker.model.as_deref().unwrap_or(""))
         .replace("$prompt", prompt)
@@ -1229,7 +1106,41 @@ fn forbidden_path_check(changed_files: &[String], forbidden_paths: &[String]) ->
     json!({ "ok": violations.is_empty(), "violations": violations })
 }
 
-fn run_status(tasks: &[Value]) -> &'static str {
+fn validate_scope_contract(
+    read_scope: &[String],
+    write_scope: &[String],
+    forbidden_paths: &[String],
+) -> Result<(), String> {
+    let conflicts = read_scope
+        .iter()
+        .chain(write_scope.iter())
+        .filter(|scope| {
+            !is_result_manifest_path(scope)
+                && forbidden_paths
+                    .iter()
+                    .any(|forbidden| scopes_overlap(scope, forbidden))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "scope contract conflict: paths cannot be both allowed and forbidden: {}",
+            conflicts.join(", ")
+        ))
+    }
+}
+
+fn scopes_overlap(left: &str, right: &str) -> bool {
+    let left = left.trim_end_matches('/');
+    let right = right.trim_end_matches('/');
+    left == right
+        || left.starts_with(&format!("{right}/"))
+        || right.starts_with(&format!("{left}/"))
+}
+
+fn tasks_status(tasks: &[Value]) -> &'static str {
     let terminal = [
         STATUS_COMPLETED,
         STATUS_FAILED,
@@ -1264,14 +1175,239 @@ fn is_internal_artifact_path(path: &str) -> bool {
         || path == "uv.lock"
 }
 
-fn is_sensitive_status_line(line: &str) -> bool {
-    let path = line.get(3..).unwrap_or(line).trim();
-    path == ".env"
-        || path.starts_with(".env.")
-        || path.contains("/.env")
-        || path.contains("secret")
-        || path.contains("token")
-        || path.contains("key")
+fn compact_hook_event_line(line: &str) -> Value {
+    let Ok(event) = serde_json::from_str::<Value>(line) else {
+        return json!({ "error": "invalid hook event json" });
+    };
+    let tool_input = event
+        .pointer("/raw/tool_input")
+        .or_else(|| event.get("tool_input"));
+    let tool_response = event
+        .pointer("/raw/tool_response")
+        .or_else(|| event.get("tool_response"));
+    json!({
+        "recorded_at": event.get("recorded_at").cloned().unwrap_or(Value::Null),
+        "hook_event_name": event.get("hook_event_name").cloned().unwrap_or(Value::Null),
+        "tool_name": event.get("tool_name").cloned().unwrap_or(Value::Null),
+        "file_path": compact_event_file_path(&event, tool_input),
+        "command": tool_input.and_then(|value| value.get("command")).and_then(Value::as_str),
+        "duration_ms": event.pointer("/raw/duration_ms").and_then(Value::as_u64),
+        "stdout_tail": tool_response
+            .and_then(|value| value.get("stdout"))
+            .and_then(Value::as_str)
+            .map(|text| tail_chars(text, 800)),
+        "stderr_tail": tool_response
+            .and_then(|value| value.get("stderr"))
+            .and_then(Value::as_str)
+            .map(|text| tail_chars(text, 800)),
+        "last_assistant_message_tail": event
+            .get("last_assistant_message")
+            .and_then(Value::as_str)
+            .map(|text| tail_chars(text, 800)),
+    })
+}
+
+fn compact_event_file_path(event: &Value, tool_input: Option<&Value>) -> Value {
+    event
+        .get("file_path")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| {
+            tool_input
+                .and_then(|value| value.get("file_path"))
+                .filter(|value| !value.is_null())
+                .cloned()
+        })
+        .unwrap_or(Value::Null)
+}
+
+#[derive(Debug, Clone, Default)]
+struct TranscriptToolUse {
+    name: String,
+    command: Option<String>,
+}
+
+fn transcript_tool_uses(text: &str) -> BTreeMap<String, TranscriptToolUse> {
+    let mut tool_uses = BTreeMap::new();
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(items) = event.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            if item.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            let Some(id) = item.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("tool_use")
+                .to_string();
+            let command = item
+                .pointer("/input/command")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            tool_uses.insert(id.to_string(), TranscriptToolUse { name, command });
+        }
+    }
+    tool_uses
+}
+
+fn compact_transcript_tool_result_line(
+    line: &str,
+    tool_uses: &BTreeMap<String, TranscriptToolUse>,
+) -> Option<Value> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    if let Some(items) = event.pointer("/message/content").and_then(Value::as_array) {
+        for item in items {
+            if item.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let tool_use_id = item.get("tool_use_id").and_then(Value::as_str);
+            let tool_use = tool_use_id.and_then(|id| tool_uses.get(id));
+            return Some(json!({
+                "timestamp": event.get("timestamp").cloned().unwrap_or(Value::Null),
+                "tool_name": tool_use.map(|value| value.name.clone()),
+                "command": tool_use.and_then(|value| value.command.clone()),
+                "tool_use_id": item.get("tool_use_id").cloned().unwrap_or(Value::Null),
+                "is_error": item.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                "content_tail": transcript_content_to_text(item.get("content")),
+                "source": "message.content",
+            }));
+        }
+    }
+    event.get("toolUseResult").map(|result| {
+        json!({
+            "timestamp": event.get("timestamp").cloned().unwrap_or(Value::Null),
+            "tool_use_id": Value::Null,
+            "is_error": false,
+            "content_tail": transcript_content_to_text(Some(result)),
+            "source": "toolUseResult",
+        })
+    })
+}
+
+fn transcript_content_to_text(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.get("text")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| item.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn is_verification_tool_result(value: &Value) -> bool {
+    if value.get("tool_name").and_then(Value::as_str) != Some("Bash") {
+        return false;
+    }
+    let command = value
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !is_verification_command(&command) {
+        return false;
+    }
+    if value
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let text = value
+        .get("content_tail")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    text.contains("test result:") || text.contains("exit code")
+}
+
+fn is_verification_command(command: &str) -> bool {
+    command.contains("test")
+        || command.contains("cargo check")
+        || command.contains("cargo build")
+        || command.contains("clippy")
+        || command.contains("fmt")
+        || command.contains("lint")
+}
+
+fn trim_tool_result_content(value: &mut Value, limit: usize) {
+    if let Some(content) = value.get_mut("content_tail") {
+        if let Some(text) = content.as_str() {
+            *content = Value::String(tail_chars(text, limit));
+        }
+    }
+}
+
+fn compact_forbidden_attempt_line(line: &str, forbidden_paths: &[String]) -> Option<Value> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    if event.get("hook_event_name").and_then(Value::as_str) != Some("PreToolUse") {
+        return None;
+    }
+    let tool_name = event.get("tool_name").and_then(Value::as_str)?;
+    let tool_input = event
+        .pointer("/raw/tool_input")
+        .or_else(|| event.get("tool_input"));
+    let path = tool_input
+        .and_then(|input| input.get("file_path"))
+        .and_then(Value::as_str)
+        .map(relative_event_path)?;
+    if is_result_manifest_path(&path) {
+        return None;
+    }
+    let matched = forbidden_paths
+        .iter()
+        .find(|scope| path_in_scope(&path, scope))
+        .cloned()?;
+    Some(json!({
+        "recorded_at": event.get("recorded_at").cloned().unwrap_or(Value::Null),
+        "tool_name": tool_name,
+        "file_path": path,
+        "forbidden_path": matched,
+    }))
+}
+
+fn relative_event_path(path: &str) -> String {
+    path.split_once("/.subdispatch/worktrees/tasks/")
+        .and_then(|(_, rest)| {
+            rest.split_once('/')
+                .map(|(_, relative)| relative.to_string())
+        })
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn is_result_manifest_path(path: &str) -> bool {
+    path == ".subdispatch/result.json"
+}
+
+fn artifact_changed_files_count(path: &Path) -> Option<usize> {
+    read_json_optional(path)
+        .ok()
+        .flatten()
+        .and_then(|artifact| artifact.get("changed_files")?.as_array().map(Vec::len))
+}
+
+fn artifact_manifest_exists(path: &Path) -> bool {
+    read_json_optional(path)
+        .ok()
+        .flatten()
+        .and_then(|artifact| artifact.get("manifest").cloned())
+        .is_some_and(|manifest| !manifest.is_null())
 }
 
 fn expand_status_path(worktree: &Path, raw_path: &str) -> Result<Vec<String>, String> {
@@ -1438,8 +1574,8 @@ fn push_unique(paths: &mut Vec<String>, path: &str) {
     }
 }
 
-fn new_run_id() -> String {
-    format!("run_{}_{}", now_secs() as u64, std::process::id())
+fn new_task_id() -> String {
+    format!("task_{}_{}", now_secs() as u64, std::process::id())
 }
 
 fn now_secs() -> f64 {
@@ -1466,19 +1602,6 @@ fn expand_home(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
-}
-
-fn safe_path_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1517,6 +1640,31 @@ mod tests {
     }
 
     #[test]
+    fn scope_contract_rejects_allowed_forbidden_overlap() {
+        let err = validate_scope_contract(&["src/task.rs".to_string()], &[], &["src".to_string()])
+            .unwrap_err();
+        assert!(err.contains("src/task.rs"));
+
+        let err = validate_scope_contract(
+            &[],
+            &["Cargo.toml".to_string()],
+            &["Cargo.toml".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn scope_contract_allows_result_manifest_exception() {
+        validate_scope_contract(
+            &[],
+            &[".subdispatch/result.json".to_string()],
+            &[".subdispatch".to_string()],
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn internal_artifacts_are_ignored() {
         assert!(is_internal_artifact_path(".claude/settings.local.json"));
         assert!(is_internal_artifact_path(".subdispatch/result.json"));
@@ -1524,27 +1672,19 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_status_lines_are_hidden_from_prompt_context() {
-        assert!(is_sensitive_status_line(" M .env"));
-        assert!(is_sensitive_status_line("?? config/token.txt"));
-        assert!(is_sensitive_status_line(" M secrets/api_key.txt"));
-        assert!(!is_sensitive_status_line(" M src/engine.rs"));
-    }
-
-    #[test]
-    fn run_status_is_completed_only_when_all_tasks_are_terminal() {
+    fn tasks_status_is_completed_only_when_all_tasks_are_terminal() {
         let tasks = vec![
             json!({ "status": "completed" }),
             json!({ "status": "failed" }),
             json!({ "status": "missing" }),
         ];
-        assert_eq!(run_status(&tasks), "completed");
+        assert_eq!(tasks_status(&tasks), "completed");
 
         let tasks = vec![
             json!({ "status": "completed" }),
             json!({ "status": "running" }),
         ];
-        assert_eq!(run_status(&tasks), "running");
+        assert_eq!(tasks_status(&tasks), "running");
     }
 
     #[test]
@@ -1563,40 +1703,275 @@ mod tests {
     }
 
     #[test]
-    fn missing_task_dirty_state_can_be_recovered_from_run_state() {
-        let root = env::temp_dir().join(format!("subdispatch-engine-test-{}", now_secs()));
+    fn start_task_rejects_dirty_workspace() {
+        let root = env::temp_dir().join(format!("subdispatch-dirty-test-{}", now_secs()));
+        fs::create_dir_all(&root).unwrap();
+        run_command("git", &["init"], &root).unwrap();
+        run_command("git", &["config", "user.email", "test@example.com"], &root).unwrap();
+        run_command("git", &["config", "user.name", "SubDispatch Test"], &root).unwrap();
+        fs::write(root.join("README.md"), "initial\n").unwrap();
+        run_command("git", &["add", "README.md"], &root).unwrap();
+        run_command("git", &["commit", "-m", "initial"], &root).unwrap();
+        fs::write(root.join("README.md"), "dirty\n").unwrap();
+
+        let mut engine = SubDispatchEngine {
+            workspace: root.clone(),
+            tasks_dir: root.join(".subdispatch").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            workers: BTreeMap::new(),
+            prompts: PromptConfig::default(),
+        };
+        let err = engine
+            .start_task(json!({
+                "instruction": "do nothing"
+            }))
+            .unwrap_err();
+        assert!(err.contains("workspace has uncommitted changes"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn start_task_rejects_scope_contract_conflict() {
+        let root = env::temp_dir().join(format!("subdispatch-scope-test-{}", now_secs()));
+        fs::create_dir_all(&root).unwrap();
+        run_command("git", &["init"], &root).unwrap();
+        run_command("git", &["config", "user.email", "test@example.com"], &root).unwrap();
+        run_command("git", &["config", "user.name", "SubDispatch Test"], &root).unwrap();
+        fs::write(root.join("README.md"), "initial\n").unwrap();
+        run_command("git", &["add", "README.md"], &root).unwrap();
+        run_command("git", &["commit", "-m", "initial"], &root).unwrap();
+
+        let mut workers = BTreeMap::new();
+        workers.insert(
+            "worker".to_string(),
+            WorkerConfig {
+                id: "worker".to_string(),
+                command: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+                max_concurrency: 1,
+                model: None,
+                enabled: true,
+                env: BTreeMap::new(),
+                worker_mode: "trusted-worktree".to_string(),
+                permission_mode: "bypassPermissions".to_string(),
+                description: "test".to_string(),
+                strengths: Vec::new(),
+                cost: "test".to_string(),
+                speed: "test".to_string(),
+            },
+        );
+        let mut engine = SubDispatchEngine {
+            workspace: root.clone(),
+            tasks_dir: root.join(".subdispatch").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            workers,
+            prompts: PromptConfig::default(),
+        };
+        let err = engine
+            .start_task(json!({
+                "task_id": "conflict",
+                "worker": "worker",
+                "instruction": "do nothing",
+                "read_scope": ["src/task.rs"],
+                "forbidden_paths": ["src"]
+            }))
+            .unwrap_err();
+        assert!(err.contains("scope contract conflict"));
+        assert!(!root
+            .join(".subdispatch")
+            .join("worktrees")
+            .join("tasks")
+            .join("conflict")
+            .exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tail_handles_utf8_boundaries() {
+        assert_eq!(tail_chars("hello中文日志", 4), "中文日志");
+    }
+
+    #[test]
+    fn transcript_tool_result_line_is_compacted() {
+        let mut tool_uses = BTreeMap::new();
+        tool_uses.insert(
+            "call_1".to_string(),
+            TranscriptToolUse {
+                name: "Bash".to_string(),
+                command: Some("cargo test".to_string()),
+            },
+        );
+        let line = r#"{"timestamp":"2026-05-11T16:10:36.537Z","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","content":"Exit code 101\nintentional_subdispatch_failure_probe ... FAILED","is_error":true}]}}"#;
+        let compact = compact_transcript_tool_result_line(line, &tool_uses).unwrap();
+        assert_eq!(compact["tool_use_id"], "call_1");
+        assert_eq!(compact["tool_name"], "Bash");
+        assert_eq!(compact["command"], "cargo test");
+        assert_eq!(compact["is_error"], true);
+        assert_eq!(compact["source"], "message.content");
+        assert!(compact["content_tail"]
+            .as_str()
+            .unwrap()
+            .contains("Exit code 101"));
+    }
+
+    #[test]
+    fn transcript_tool_result_content_is_trimmed() {
+        let mut value = json!({ "content_tail": "0123456789中文日志" });
+        trim_tool_result_content(&mut value, 4);
+        assert_eq!(value["content_tail"], "中文日志");
+    }
+
+    #[test]
+    fn transcript_tool_results_tail_prefers_verification_results() {
+        let root = env::temp_dir().join(format!("subdispatch-tool-results-test-{}", now_secs()));
+        let transcript_path = root.join("transcript.jsonl");
+        let task_dir = root.join(".subdispatch").join("tasks").join("task");
+        fs::create_dir_all(&task_dir).unwrap();
+        fs::write(
+            &transcript_path,
+            [
+                r#"{"timestamp":"t0","message":{"content":[{"type":"tool_use","id":"read","name":"Read","input":{"file_path":"src/lib.rs"}}]}}"#,
+                r#"{"timestamp":"t1","message":{"content":[{"type":"tool_result","tool_use_id":"read","content":"large file content","is_error":false}]}}"#,
+                r#"{"timestamp":"t1b","message":{"content":[{"type":"tool_use","id":"test","name":"Bash","input":{"command":"cargo test 2>&1"}}]}}"#,
+                r#"{"timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"test","content":"Exit code 101\nfailed test","is_error":true}]}}"#,
+                r#"{"timestamp":"t2b","message":{"content":[{"type":"tool_use","id":"test2","name":"Bash","input":{"command":"cargo test 2>&1"}}]}}"#,
+                r#"{"timestamp":"t3","message":{"content":[{"type":"tool_result","tool_use_id":"test2","content":"running 5 tests\ntest result: ok. 5 passed","is_error":false}]}}"#,
+                r#"{"timestamp":"t3b","message":{"content":[{"type":"tool_use","id":"write","name":"Write","input":{"file_path":"result.json"}}]}}"#,
+                r#"{"timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"write","content":"wrote manifest","is_error":false}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
         let engine = SubDispatchEngine {
             workspace: root.clone(),
-            runs_dir: root.join(".subdispatch").join("runs"),
-            worktrees_dir: root.join(".subdispatch").join("worktrees"),
-            integration_branch: DEFAULT_INTEGRATION_BRANCH.to_string(),
+            tasks_dir: root.join(".subdispatch").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
             workers: BTreeMap::new(),
+            prompts: PromptConfig::default(),
         };
-        let run_id = "run_dirty";
-        let task_id = "task_dirty";
-        let run = RunState {
-            id: run_id.to_string(),
-            goal: "goal".to_string(),
-            base_ref: "HEAD".to_string(),
-            base_commit: "abc".to_string(),
-            workspace: root.display().to_string(),
-            created_at: now_secs(),
-            workspace_dirty: true,
-            workspace_dirty_summary: vec!["M src/engine.rs".to_string()],
-            tasks: vec![task_id.to_string()],
+        let task = test_task(&root, Some(task_dir.join("hook_summary.json")));
+        write_json(
+            &task_dir.join("hook_summary.json"),
+            &json!({ "transcript_path": transcript_path.display().to_string() }),
+        )
+        .unwrap();
+
+        let results = engine.transcript_tool_results_tail(&task, 4, 2000).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["tool_use_id"], "test");
+        assert_eq!(results[1]["tool_use_id"], "test2");
+        assert!(results[0]["content_tail"]
+            .as_str()
+            .unwrap()
+            .contains("Exit code 101"));
+        assert!(results[1]["content_tail"]
+            .as_str()
+            .unwrap()
+            .contains("test result: ok"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transcript_tool_results_tail_ignores_non_verification_bash() {
+        let root = env::temp_dir().join(format!("subdispatch-nonverify-test-{}", now_secs()));
+        let transcript_path = root.join("transcript.jsonl");
+        let task_dir = root.join(".subdispatch").join("tasks").join("task");
+        fs::create_dir_all(&task_dir).unwrap();
+        fs::write(
+            &transcript_path,
+            [
+                r#"{"timestamp":"t1","message":{"content":[{"type":"tool_use","id":"mkdir","name":"Bash","input":{"command":"mkdir -p .subdispatch"}}]}}"#,
+                r#"{"timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"mkdir","content":"(Bash completed with no output)","is_error":false}]}}"#,
+                r#"{"timestamp":"t3","message":{"content":[{"type":"tool_use","id":"test","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+                r#"{"timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"test","content":"test result: ok. 1 passed","is_error":false}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let engine = SubDispatchEngine {
+            workspace: root.clone(),
+            tasks_dir: root.join(".subdispatch").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            workers: BTreeMap::new(),
+            prompts: PromptConfig::default(),
         };
-        let task = TaskState {
-            id: task_id.to_string(),
-            run_id: run_id.to_string(),
+        let task = test_task(&root, Some(task_dir.join("hook_summary.json")));
+        write_json(
+            &task_dir.join("hook_summary.json"),
+            &json!({ "transcript_path": transcript_path.display().to_string() }),
+        )
+        .unwrap();
+
+        let results = engine.transcript_tool_results_tail(&task, 4, 2000).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["tool_use_id"], "test");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn forbidden_path_attempts_report_transient_pretool_edits() {
+        let line = r#"{"recorded_at":1.0,"hook_event_name":"PreToolUse","tool_name":"Edit","raw":{"tool_input":{"file_path":"/repo/.subdispatch/worktrees/tasks/storage-parent-dirs/Cargo.toml"}}}"#;
+        let attempts = compact_forbidden_attempt_line(line, &["Cargo.toml".to_string()]).unwrap();
+        assert_eq!(attempts["tool_name"], "Edit");
+        assert_eq!(attempts["file_path"], "Cargo.toml");
+        assert_eq!(attempts["forbidden_path"], "Cargo.toml");
+    }
+
+    #[test]
+    fn forbidden_path_attempts_ignore_result_manifest_write() {
+        let line = r#"{"recorded_at":1.0,"hook_event_name":"PreToolUse","tool_name":"Write","raw":{"tool_input":{"file_path":"/repo/.subdispatch/worktrees/tasks/example/.subdispatch/result.json"}}}"#;
+        assert!(compact_forbidden_attempt_line(line, &[".subdispatch".to_string()]).is_none());
+    }
+
+    #[test]
+    fn transcript_path_falls_back_when_agent_path_is_null() {
+        let root = env::temp_dir().join(format!("subdispatch-transcript-test-{}", now_secs()));
+        let engine = SubDispatchEngine {
+            workspace: root.clone(),
+            tasks_dir: root.join(".subdispatch").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            workers: BTreeMap::new(),
+            prompts: PromptConfig::default(),
+        };
+        let task = test_task(
+            &root,
+            Some(
+                root.join(".subdispatch")
+                    .join("tasks")
+                    .join("task")
+                    .join("hook_summary.json"),
+            ),
+        );
+        write_json(
+            &PathBuf::from(task.hook_summary_path.as_ref().unwrap()),
+            &json!({
+                "agent_transcript_path": null,
+                "transcript_path": "/tmp/transcript.jsonl"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            engine.transcript_path(&task).unwrap(),
+            Some("/tmp/transcript.jsonl".to_string())
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn test_task(root: &Path, hook_summary_path: Option<PathBuf>) -> TaskState {
+        TaskState {
+            id: "task".to_string(),
             goal: "goal".to_string(),
-            instruction: "task".to_string(),
-            worker: "minimax".to_string(),
-            status: STATUS_QUEUED.to_string(),
-            branch: "agent/run_dirty/task_dirty".to_string(),
+            instruction: "instruction".to_string(),
+            worker: "worker".to_string(),
+            status: STATUS_COMPLETED.to_string(),
+            branch: "agent/task".to_string(),
             worktree: root.join("worktree").display().to_string(),
-            base_commit: "abc".to_string(),
-            workspace_dirty: false,
-            workspace_dirty_summary: Vec::new(),
+            base_commit: "base".to_string(),
             read_scope: Vec::new(),
             write_scope: Vec::new(),
             forbidden_paths: Vec::new(),
@@ -1604,60 +1979,17 @@ mod tests {
             context_files: Vec::new(),
             created_at: now_secs(),
             pid: None,
-            exit_code: None,
+            exit_code: Some(0),
             error: None,
             started_at: None,
             finished_at: None,
             exit_path: None,
             hook_events_path: None,
-            hook_summary_path: None,
+            hook_summary_path: hook_summary_path.map(|path| path.display().to_string()),
             command: None,
             warning: None,
             worktree_removed: None,
             worktree_deleted_at: None,
-        };
-        engine.write_run(&run).unwrap();
-        engine.write_task(&task).unwrap();
-
-        let recovered = engine.read_task(run_id, task_id).unwrap();
-        assert!(recovered.workspace_dirty);
-        assert_eq!(recovered.workspace_dirty_summary, vec!["M src/engine.rs"]);
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn integration_worktree_path_uses_managed_directory() {
-        let root = env::temp_dir().join(format!("subdispatch-path-test-{}", now_secs()));
-        let engine = SubDispatchEngine {
-            workspace: root.clone(),
-            runs_dir: root.join(".subdispatch").join("runs"),
-            worktrees_dir: root.join(".subdispatch").join("worktrees"),
-            integration_branch: "worktree_main".to_string(),
-            workers: BTreeMap::new(),
-        };
-        assert_eq!(
-            engine.integration_worktree_path(),
-            root.join(".subdispatch")
-                .join("worktrees")
-                .join("integration")
-                .join(safe_path_component(
-                    root.file_name().unwrap().to_str().unwrap()
-                ))
-                .join("worktree_main")
-        );
-    }
-
-    #[test]
-    fn safe_path_component_replaces_path_unsafe_chars() {
-        assert_eq!(
-            safe_path_component("Sub Dispatch/alpha"),
-            "Sub_Dispatch_alpha"
-        );
-    }
-
-    #[test]
-    fn tail_handles_utf8_boundaries() {
-        assert_eq!(tail_chars("hello中文日志", 4), "中文日志");
+        }
     }
 }

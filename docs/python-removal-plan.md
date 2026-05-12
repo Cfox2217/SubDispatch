@@ -1,39 +1,37 @@
-# Python MVP Removal Plan
+# Python MVP Removal Record
 
-Python code should be removed only after the Rust binary has replaced the
-runtime, install, setup, and observability paths.
+The Python MVP has been removed. SubDispatch now has one runtime path: the Rust
+single binary.
 
-## Keep Until Rust Proves
+## Removed
 
-- `subdispatch/subdispatch.py` behavior is covered by Rust CLI/MCP smoke tests.
-- `subdispatch_mcp.py` behavior is covered by Rust MCP stdio tests.
-- `.env` worker parsing supports the GLM and MiniMax configurations in use.
-- Claude hook events are visible through `poll-run`, `collect-task`, and Web
-  Activity.
-- `delete-worktree` preserves artifacts and refuses unsafe paths.
+- Python CLI entry (`cli.py`)
+- Python MCP entry (`subdispatch_mcp.py`)
+- Python package directory (`subdispatch/`)
+- Python tests (`tests/`)
+- Python packaging metadata (`pyproject.toml`)
 
-## Removal Scope
+## Replacement
 
-When ready, remove:
+- CLI: `subdispatch ...`
+- MCP stdio server: `subdispatch mcp --workspace .`
+- Web UI: `subdispatch serve --workspace .`
+- Release package: `scripts/release.sh`
 
-- `cli.py`
-- `subdispatch_mcp.py`
-- `subdispatch/`
-- Python tests that only cover removed code
-- Python packaging metadata in `pyproject.toml`
+## Verification
 
-Keep or replace:
+Use the Rust checks:
 
-- README and docs
-- `.env.example`
-- Rust integration tests
-- release scripts
+```bash
+cargo fmt --check
+cargo test
+cargo build
+git diff --check
+```
 
-## Exit Criteria
+For MCP contract smoke:
 
-- `cargo test`
-- `scripts/release.sh`
-- fake-worker CLI end-to-end smoke
-- MCP `initialize`, `tools/list`, and each core tool call smoke
-- Web `/api/setup`, `/api/env`, and `/api/snapshot` smoke
-- one manual real Claude Code worker run, if credentials and quota are available
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  | target/debug/subdispatch mcp --workspace .
+```

@@ -1,4 +1,4 @@
-# SubDispatch MVP
+# SubDispatch Core Runtime
 
 SubDispatch is a local scaffold for a primary LLM to run child coding agents in
 parallel. The primary LLM owns planning, review, merge decisions, and conflict
@@ -16,11 +16,10 @@ artifact collection, and worktree cleanup.
 
 ## Core model
 
-SubDispatch tracks three entities:
+SubDispatch tracks two entities:
 
-- `Worker`: a configured external coding-agent command. The MVP default is
+- `Worker`: a configured external coding-agent command. The default is
   `claude-code`.
-- `Run`: one group of child tasks launched from a shared base commit.
 - `Task`: one child-agent execution in its own branch and git worktree.
 
 Each task records its base commit, branch, worktree path, process id, logs,
@@ -34,10 +33,10 @@ SubDispatch reads project-local configuration from `.env` in the workspace root.
 Create the local file with:
 
 ```bash
-python cli.py init-env
+subdispatch init-env
 ```
 
-Then edit `.env` directly. The MVP supports the default `claude-code` worker:
+Then edit `.env` directly. SubDispatch supports the default `claude-code` worker:
 
 - `SUBDISPATCH_WORKER_MODE`
 - `SUBDISPATCH_CLAUDE_ENABLED`
@@ -52,7 +51,26 @@ The default worker mode is `trusted-worktree` with Claude Code
 `bypassPermissions`. This is intentional for delegated coding loops where the
 primary agent transfers execution ownership to the child agent. It is not a
 security sandbox. SubDispatch relies on isolated git worktrees, explicit task
-scope, logs, and post-run artifact review rather than pre-execution containment.
+scope, logs, and post-task artifact review rather than pre-execution containment.
+
+Prompt configuration is stored in `.subdispatch/prompts.json`. It is optional:
+SubDispatch uses built-in defaults until the user saves overrides from the Web
+UI. Prompt configuration covers primary-agent guidance, MCP tool descriptions,
+child-agent template/safety rules/manifest schema, review guidance, and worker
+profile hints. Changes apply to new MCP tool listings and new child tasks; they
+do not rewrite existing tasks.
+
+The child-agent template supports these placeholders:
+
+- `{{goal}}`
+- `{{instruction}}`
+- `{{read_scope}}`
+- `{{write_scope}}`
+- `{{forbidden_paths}}`
+- `{{result_path}}`
+- `{{manifest_schema}}`
+- `{{safety_rules}}`
+- `{{context_block}}`
 
 ## Interfaces
 
@@ -69,41 +87,32 @@ Returns available workers and current capacity:
 - available slots
 - unavailable reason, if any
 
-### `init_integration`
+### `start_task`
 
-Creates or verifies the persistent integration branch/worktree used as the
-default delegation base. The default branch is `worktree_main`, configurable
-through `SUBDISPATCH_INTEGRATION_BRANCH`.
+Starts one primary-LLM supplied child task. SubDispatch creates a branch and
+worktree, writes a task prompt, and starts the configured worker when capacity
+is available. A task over the worker concurrency limit stays queued.
 
-The primary agent should develop and checkpoint work on this integration line.
-When `start_run` omits `base`, SubDispatch creates child task branches from the
-integration branch HEAD. If that integration worktree has uncommitted changes,
-`start_run` refuses to delegate until the primary agent commits a checkpoint or
-passes an explicit `base`.
+Delegation requires a clean committed checkpoint. The primary agent owns its own
+branch/worktree strategy and must commit any in-progress changes before calling
+`start_task`. SubDispatch does not manage a hidden integration branch. If the
+workspace has uncommitted changes, `start_task` returns an error instead of
+creating a child worktree.
 
-### `start_run`
+If `base`/`base_branch` is omitted, the task starts from the current `HEAD`.
+Passing `base` remains an explicit override for special cases.
 
-Starts a run from a primary-LLM supplied task list. For every task,
-SubDispatch creates a branch and worktree, writes a task prompt, and starts the
-configured worker when capacity is available. Tasks over the worker concurrency
-limit stay queued.
+Parallelism is explicit: the primary agent calls `start_task` multiple times,
+selects workers based on available slots and task fit, then reviews each result
+independently.
 
-If `base`/`base_branch` is omitted, the run starts from the configured
-integration branch HEAD. Passing `base` remains an explicit override for special
-cases.
+### `poll_tasks`
 
-If the primary workspace has uncommitted changes, SubDispatch records a
-redacted `git status --short` summary on the run and every task, and injects
-that summary into the child prompt. Child worktrees are still created from the
-recorded base commit; dirty primary-workspace content is not copied unless the
-primary agent explicitly supplies it through `context` or `context_files`.
+Returns factual task status globally, optionally filtered by `task_ids`,
+`status`, or `active_only`. Polling refreshes process state and starts queued
+tasks when worker slots open.
 
-### `poll_run`
-
-Returns factual task status for a run. Polling refreshes process state and
-starts queued tasks when worker slots open.
-
-`poll_run` is also the primary observability surface. A running child agent may
+`poll_tasks` is also the primary observability surface. A running child agent may
 spend a long time planning before stdout, stderr, or git diff changes. The
 primary agent should not infer failure from silence. SubDispatch reports:
 
