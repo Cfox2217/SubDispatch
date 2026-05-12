@@ -835,6 +835,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const lastSeen = new Map();
     const frozen = new Set();
     const hiddenTerminals = new Set();
+    const eventWatermarks = new Map();
+    let suppressExistingEvents = true;
     let hideInactive = false;
     let currentEnv = '';
     let promptConfig = null;
@@ -959,6 +961,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       logs.clear();
       lastSeen.clear();
       frozen.clear();
+      suppressExistingEvents = true;
       hideInactive = false;
       renderInactiveToggle();
       document.getElementById('eventCount').textContent = '0';
@@ -1254,10 +1257,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (task.status === 'running' && task.idle_seconds != null) parts.push(`idle=${task.idle_seconds}s`);
       return parts.join(' ');
     }
-    function observeTask(task) {
-      const key = taskKey(task);
-      if (frozen.has(key)) return;
-      const snapshot = JSON.stringify({
+    function eventCursor(event) {
+      return [
+        event?.recorded_at ?? '',
+        event?.hook_event_name || '',
+        event?.tool_name || '',
+        event?.file_path || '',
+        event?.command || '',
+        event?.duration_ms ?? ''
+      ].join('|');
+    }
+    function eventCursorValue(task) {
+      const events = task.recent_events || [];
+      if (events.length > 0) return eventCursor(events[events.length - 1]);
+      return String(task.event_count || 0);
+    }
+    function taskSnapshot(task, cursor = eventCursorValue(task)) {
+      return JSON.stringify({
         status: task.status,
         events: task.event_count,
         tool: task.last_tool_name,
@@ -1268,18 +1284,47 @@ const INDEX_HTML: &str = r#"<!doctype html>
         manifest: task.manifest_exists,
         patch: task.patch_exists,
         assistant: task.last_assistant_message_tail,
-        recent: task.recent_events
+        cursor
       });
+    }
+    function eventsAfterCursor(events, previousCursor) {
+      if (!events.length || !previousCursor) return events;
+      const index = events.findIndex(event => eventCursor(event) === previousCursor);
+      if (index >= 0) return events.slice(index + 1);
+      return events.slice(-1);
+    }
+    function observeTask(task) {
+      const key = taskKey(task);
+      if (frozen.has(key)) return;
+      const events = task.recent_events || [];
+      const cursor = eventCursorValue(task);
       if (!lastSeen.has(key)) {
         addLog(key, `<span class="run">start</span> ${esc(task.id)} <span class="dim">on</span> ${esc(providerLabel(task.worker))}`);
         addLogBlock(key, 'goal', task.goal || task.instruction || '');
         addLog(key, `<span class="dim">branch</span> ${esc(task.branch || '-')} <span class="dim">worktree</span> ${esc(shortPath(task.worktree || '-'))}`);
-        for (const event of (task.recent_events || []).slice(-6)) {
+        for (const event of events.slice(-4)) {
           addLog(key, `<span class="dim">hook</span> ${esc(eventLine(event))}`);
         }
-      } else if (lastSeen.get(key) !== snapshot) {
+        if (task.status === 'completed' || task.status === 'failed') {
+          const cls = task.status === 'completed' ? 'ok' : 'bad';
+          addLog(key, `<span class="${cls}">end</span> exit=${esc(task.exit_code ?? 0)} ${esc(taskEvidenceLine(task))}`);
+          addLogBlock(key, 'final', task.last_assistant_message_tail || task.error || '');
+          frozen.add(key);
+        }
+        lastSeen.set(key, taskSnapshot(task, cursor) + ((task.status === 'completed' || task.status === 'failed') ? `,"final":"${task.status}"` : ''));
+        eventWatermarks.set(key, cursor);
+        return;
+      }
+      const snapshot = taskSnapshot(task, cursor);
+      if (lastSeen.get(key) !== snapshot) {
         const cls = task.status === 'running' ? 'run' : task.status === 'completed' ? 'ok' : task.status === 'failed' ? 'bad' : 'warn';
         addLog(key, `<span class="${cls}">${esc(task.status)}</span> ${esc(latestHookLine(task))} <span class="dim">${esc(taskEvidenceLine(task))}</span>`);
+        const previousCursor = eventWatermarks.get(key);
+        const newEvents = eventsAfterCursor(events, previousCursor);
+        for (const event of newEvents.slice(-4)) {
+          addLog(key, `<span class="dim">hook</span> ${esc(eventLine(event))}`);
+        }
+        eventWatermarks.set(key, cursor);
         if (task.status !== 'completed' && task.status !== 'failed' && task.last_assistant_message_tail) {
           addLogBlock(key, 'agent', task.last_assistant_message_tail);
         }
@@ -1297,6 +1342,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     function renderTerminals(snapshot) {
       const allTasks = sortTasks(snapshot.tasks || []);
+      if (suppressExistingEvents) {
+        for (const task of allTasks) {
+          const key = taskKey(task);
+          const cursor = eventCursorValue(task);
+          eventWatermarks.set(key, cursor);
+          lastSeen.set(key, taskSnapshot(task, cursor) + ((task.status === 'completed' || task.status === 'failed') ? `,"final":"${task.status}"` : ''));
+          if (task.status === 'completed' || task.status === 'failed') frozen.add(key);
+        }
+        suppressExistingEvents = false;
+      }
       for (const task of allTasks) observeTask(task);
 
       const running = allTasks.filter(task => task.status === 'running');
@@ -1406,6 +1461,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     function shortPath(path) {
       const value = String(path || '');
+      const slotMarker = '/.subdispatch/worktrees/slots/';
+      const slotIndex = value.indexOf(slotMarker);
+      if (slotIndex >= 0) return `slots/${value.slice(slotIndex + slotMarker.length)}`;
       const marker = '/.subdispatch/worktrees/tasks/';
       const index = value.indexOf(marker);
       if (index >= 0) return `tasks/${value.slice(index + marker.length)}`;

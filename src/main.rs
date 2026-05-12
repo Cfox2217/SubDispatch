@@ -71,7 +71,7 @@ enum Command {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
-    /// Delete one managed task worktree.
+    /// Delete one managed slot worktree.
     DeleteWorktree {
         task_id: String,
         #[arg(long, default_value = ".")]

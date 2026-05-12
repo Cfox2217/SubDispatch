@@ -38,6 +38,8 @@ struct TaskState {
     worktree: String,
     base_commit: String,
     #[serde(default)]
+    slot_id: Option<String>,
+    #[serde(default)]
     read_scope: Vec<String>,
     #[serde(default)]
     write_scope: Vec<String>,
@@ -72,6 +74,8 @@ struct TaskState {
     worktree_removed: Option<bool>,
     #[serde(default)]
     worktree_deleted_at: Option<f64>,
+    #[serde(default)]
+    collected_at: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,7 +96,7 @@ impl SubDispatchEngine {
         let root = workspace.join(".subdispatch");
         Ok(Self {
             tasks_dir: root.join("tasks"),
-            worktrees_dir: root.join("worktrees").join("tasks"),
+            worktrees_dir: root.join("worktrees").join("slots"),
             workspace,
             workers,
             prompts,
@@ -198,11 +202,6 @@ impl SubDispatchEngine {
         validate_scope_contract(&read_scope, &write_scope, &forbidden_paths)?;
         fs::create_dir_all(&task_dir)
             .map_err(|err| format!("failed to create task directory: {err}"))?;
-        fs::create_dir_all(&self.worktrees_dir)
-            .map_err(|err| format!("failed to create worktree directory: {err}"))?;
-        let worktree = self.worktrees_dir.join(&task_id);
-        self.git(&["branch", &branch, &base_commit])?;
-        self.git(&["worktree", "add", &worktree.display().to_string(), &branch])?;
         let task = TaskState {
             id: task_id.clone(),
             goal,
@@ -210,8 +209,9 @@ impl SubDispatchEngine {
             worker: worker_id,
             status: STATUS_QUEUED.to_string(),
             branch,
-            worktree: worktree.display().to_string(),
+            worktree: String::new(),
             base_commit: base_commit.clone(),
+            slot_id: None,
             read_scope,
             write_scope,
             forbidden_paths,
@@ -234,6 +234,7 @@ impl SubDispatchEngine {
             warning: None,
             worktree_removed: None,
             worktree_deleted_at: None,
+            collected_at: None,
         };
         self.write_task(&task)?;
         self.schedule_queued_tasks()?;
@@ -274,8 +275,12 @@ impl SubDispatchEngine {
     pub fn collect_task(&mut self, task_id: &str) -> Result<Value, String> {
         let _lock = self.acquire_state_lock()?;
         self.refresh_task(task_id)?;
-        let task = self.read_task(task_id)?;
+        let mut task = self.read_task(task_id)?;
         let task_dir = self.task_dir(task_id);
+        let artifact_path = task_dir.join("artifact.json");
+        if task.collected_at.is_some() && artifact_path.exists() {
+            return read_json(&artifact_path);
+        }
         let worktree = PathBuf::from(&task.worktree);
         let changed_files = self.changed_files(&task)?;
         let diff = self.task_diff(&task)?;
@@ -286,12 +291,13 @@ impl SubDispatchEngine {
         let manifest = read_json_optional(&manifest_path)?;
         let artifact = json!({
             "task_id": task_id,
-            "status": task.status,
-            "instruction": task.instruction,
-            "worker": task.worker,
-            "base_commit": task.base_commit,
-            "branch": task.branch,
-            "worktree": task.worktree,
+            "status": task.status.clone(),
+            "instruction": task.instruction.clone(),
+            "worker": task.worker.clone(),
+            "base_commit": task.base_commit.clone(),
+            "branch": task.branch.clone(),
+            "worktree": task.worktree.clone(),
+            "slot_id": task.slot_id.clone(),
             "changed_files": changed_files,
             "diff": diff,
             "patch_path": patch_path.display().to_string(),
@@ -306,7 +312,9 @@ impl SubDispatchEngine {
             "scope_check": scope_check(&changed_files, &task.write_scope),
             "forbidden_path_check": forbidden_path_check(&changed_files, &task.forbidden_paths),
         });
-        write_json(&task_dir.join("artifact.json"), &artifact)?;
+        write_json(&artifact_path, &artifact)?;
+        task.collected_at = Some(now_secs());
+        self.write_task(&task)?;
         Ok(artifact)
     }
 
@@ -320,7 +328,19 @@ impl SubDispatchEngine {
         self.refresh_task(task_id)?;
         let mut task = self.read_task(task_id)?;
         if task.status == STATUS_RUNNING && !force {
-            return Err("Refusing to delete running task worktree without force=true".to_string());
+            return Err(
+                "Refusing to delete a running slot worktree without force=true".to_string(),
+            );
+        }
+        if task.collected_at.is_none() && !force {
+            return Err("Refusing to delete a slot worktree before collect_task has captured task evidence. Run collect_task first or use force=true.".to_string());
+        }
+        if !force {
+            if let Some(other_task_id) = self.slot_held_by_other_task(&task)? {
+                return Err(format!(
+                    "Refusing to delete slot worktree while task {other_task_id} still uses the same slot. Use force=true only for manual recovery."
+                ));
+            }
         }
         let worktree = absolute_path(Path::new(&task.worktree))?;
         let managed_root = absolute_path(&self.worktrees_dir)?;
@@ -353,6 +373,7 @@ impl SubDispatchEngine {
             "task_id": task_id,
             "worktree_removed": removed,
             "branch_deleted": branch_deleted,
+            "slot_id": task.slot_id,
             "artifact_dir": self.task_dir(task_id).display().to_string(),
         }))
     }
@@ -378,6 +399,7 @@ impl SubDispatchEngine {
     fn schedule_queued_tasks(&mut self) -> Result<(), String> {
         self.refresh_all_tasks()?;
         let mut running_counts = self.running_counts_by_worker()?;
+        let mut occupied_slots = self.occupied_slots_by_worker()?;
         for mut task in self.all_tasks()? {
             if task.status != STATUS_QUEUED {
                 continue;
@@ -395,10 +417,89 @@ impl SubDispatchEngine {
             if running_counts.get(&worker.id).copied().unwrap_or(0) >= worker.max_concurrency {
                 continue;
             }
+            let Some(slot_index) = self.next_free_slot(&worker, &occupied_slots) else {
+                continue;
+            };
+            self.prepare_task_slot(&mut task, &worker, slot_index)?;
             self.start_task_process(&mut task, &worker)?;
-            *running_counts.entry(worker.id).or_insert(0) += 1;
+            *running_counts.entry(worker.id.clone()).or_insert(0) += 1;
+            occupied_slots
+                .entry(worker.id)
+                .or_default()
+                .push(slot_index);
         }
         Ok(())
+    }
+
+    fn prepare_task_slot(
+        &self,
+        task: &mut TaskState,
+        worker: &WorkerConfig,
+        slot_index: usize,
+    ) -> Result<(), String> {
+        fs::create_dir_all(&self.worktrees_dir)
+            .map_err(|err| format!("failed to create worktree directory: {err}"))?;
+        let slot_id = format!("{}/slot-{}", worker.id, slot_index);
+        let worktree = self.slot_worktree_path(&worker.id, slot_index);
+        if self.branch_exists(&task.branch) {
+            return Err(format!("task branch already exists: {}", task.branch));
+        }
+        if worktree.exists() {
+            self.ensure_reusable_slot_worktree(&worktree)?;
+            self.git_in(&worktree, &["reset", "--hard"])?;
+            self.git_in(&worktree, &["clean", "-fd"])?;
+        } else {
+            let base_branch = format!("subdispatch/slot/{}/slot-{}", worker.id, slot_index);
+            if !self.branch_exists(&base_branch) {
+                self.git(&["branch", &base_branch, &task.base_commit])?;
+            }
+            self.git(&[
+                "worktree",
+                "add",
+                &worktree.display().to_string(),
+                &base_branch,
+            ])?;
+        }
+        self.git_in(
+            &worktree,
+            &["checkout", "-B", &task.branch, &task.base_commit],
+        )?;
+        self.git_in(&worktree, &["reset", "--hard", &task.base_commit])?;
+        self.git_in(&worktree, &["clean", "-fd"])?;
+        task.slot_id = Some(slot_id);
+        task.worktree = worktree.display().to_string();
+        Ok(())
+    }
+
+    fn ensure_reusable_slot_worktree(&self, worktree: &Path) -> Result<(), String> {
+        let managed_root = absolute_path(&self.worktrees_dir)?;
+        let worktree = absolute_path(worktree)?;
+        if !worktree.starts_with(&managed_root) {
+            return Err(format!(
+                "refusing to reuse unmanaged slot worktree: {}",
+                worktree.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn slot_worktree_path(&self, worker_id: &str, slot_index: usize) -> PathBuf {
+        self.worktrees_dir
+            .join(worker_id)
+            .join(format!("slot-{slot_index}"))
+    }
+
+    fn next_free_slot(
+        &self,
+        worker: &WorkerConfig,
+        occupied_slots: &BTreeMap<String, Vec<usize>>,
+    ) -> Option<usize> {
+        let occupied = occupied_slots.get(&worker.id);
+        (0..worker.max_concurrency).find(|slot| {
+            !occupied
+                .map(|slots| slots.iter().any(|occupied| occupied == slot))
+                .unwrap_or(false)
+        })
     }
 
     fn start_task_process(
@@ -610,6 +711,35 @@ impl SubDispatchEngine {
         Ok(counts)
     }
 
+    fn occupied_slots_by_worker(&self) -> Result<BTreeMap<String, Vec<usize>>, String> {
+        let mut slots = BTreeMap::<String, Vec<usize>>::new();
+        for task in self.all_tasks()? {
+            if !task_holds_slot(&task) {
+                continue;
+            }
+            let Some(slot_index) = task_slot_index(&task) else {
+                continue;
+            };
+            slots.entry(task.worker).or_default().push(slot_index);
+        }
+        Ok(slots)
+    }
+
+    fn slot_held_by_other_task(&self, task: &TaskState) -> Result<Option<String>, String> {
+        let Some(slot_id) = task.slot_id.as_deref() else {
+            return Ok(None);
+        };
+        for other in self.all_tasks()? {
+            if other.id == task.id || other.slot_id.as_deref() != Some(slot_id) {
+                continue;
+            }
+            if task_holds_slot(&other) {
+                return Ok(Some(other.id));
+            }
+        }
+        Ok(None)
+    }
+
     fn all_tasks(&self) -> Result<Vec<TaskState>, String> {
         let mut tasks = Vec::new();
         if !self.tasks_dir.exists() {
@@ -649,7 +779,9 @@ impl SubDispatchEngine {
         let artifact_path = task_dir.join("artifact.json");
         let patch_path = task_dir.join("diff.patch");
         let worktree_manifest_path = worktree.join(".subdispatch").join("result.json");
-        let changed_files_count = if worktree.exists() {
+        let changed_files_count = if task.collected_at.is_some() {
+            artifact_changed_files_count(&artifact_path).unwrap_or(0)
+        } else if worktree.exists() {
             self.changed_files(task)?.len()
         } else {
             artifact_changed_files_count(&artifact_path).unwrap_or(0)
@@ -669,6 +801,8 @@ impl SubDispatchEngine {
             "runtime_seconds": runtime_seconds,
             "branch": task.branch,
             "worktree": task.worktree,
+            "slot_id": task.slot_id,
+            "collected_at": task.collected_at,
             "worktree_exists": worktree.exists(),
             "branch_exists": self.branch_exists(&task.branch),
             "manifest_exists": manifest_exists,
@@ -1217,6 +1351,26 @@ fn tasks_status(tasks: &[Value]) -> &'static str {
     }
 }
 
+fn task_holds_slot(task: &TaskState) -> bool {
+    task.slot_id.is_some()
+        && !task.worktree_removed.unwrap_or(false)
+        && match task.status.as_str() {
+            STATUS_QUEUED | STATUS_RUNNING => true,
+            STATUS_COMPLETED | STATUS_FAILED | STATUS_CANCELLED | STATUS_MISSING => {
+                task.collected_at.is_none()
+            }
+            _ => true,
+        }
+}
+
+fn task_slot_index(task: &TaskState) -> Option<usize> {
+    task.slot_id
+        .as_deref()
+        .and_then(|slot| slot.rsplit_once('/'))
+        .and_then(|(_, slot)| slot.strip_prefix("slot-"))
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
 fn path_in_scope(path: &str, scope: &str) -> bool {
     let scope = scope.trim_end_matches('/');
     path == scope || path.starts_with(&format!("{scope}/"))
@@ -1440,6 +1594,17 @@ fn compact_forbidden_attempt_line(line: &str, forbidden_paths: &[String]) -> Opt
 }
 
 fn relative_event_path(path: &str) -> String {
+    if let Some(relative) =
+        path.split_once("/.subdispatch/worktrees/slots/")
+            .and_then(|(_, rest)| {
+                let mut parts = rest.splitn(3, '/');
+                let _worker = parts.next()?;
+                let _slot = parts.next()?;
+                parts.next().map(ToOwned::to_owned)
+            })
+    {
+        return relative;
+    }
     path.split_once("/.subdispatch/worktrees/tasks/")
         .and_then(|(_, rest)| {
             rest.split_once('/')
@@ -1725,6 +1890,21 @@ fn detach_process_group(command: &mut Command) {
 mod tests {
     use super::*;
 
+    fn wait_for_task_status(engine: &mut SubDispatchEngine, task_id: &str, status: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            engine.poll_tasks(json!({})).unwrap();
+            let task = engine.read_task(task_id).unwrap();
+            if task.status == status {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("task {task_id} did not reach {status}; got {}", task.status);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     #[test]
     fn scope_checks_prefixes() {
         let changed = vec!["src/main.rs".to_string(), "README.md".to_string()];
@@ -1885,7 +2065,7 @@ mod tests {
                     worktrees_dir: workspace
                         .join(".subdispatch")
                         .join("worktrees")
-                        .join("tasks"),
+                        .join("slots"),
                     workers,
                     prompts: PromptConfig::default(),
                 };
@@ -1905,7 +2085,7 @@ mod tests {
         let engine = SubDispatchEngine {
             workspace: root.clone(),
             tasks_dir: root.join(".subdispatch").join("tasks"),
-            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("slots"),
             workers: BTreeMap::new(),
             prompts: PromptConfig::default(),
         };
@@ -1931,6 +2111,157 @@ mod tests {
     }
 
     #[test]
+    fn slot_is_reused_only_after_collect() {
+        let root = env::temp_dir().join(format!("subdispatch-slot-reuse-test-{}", now_secs()));
+        fs::create_dir_all(&root).unwrap();
+        run_command("git", &["init"], &root).unwrap();
+        run_command("git", &["config", "user.email", "test@example.com"], &root).unwrap();
+        run_command("git", &["config", "user.name", "SubDispatch Test"], &root).unwrap();
+        fs::write(root.join("README.md"), "initial\n").unwrap();
+        fs::write(root.join(".gitignore"), ".subdispatch/\n").unwrap();
+        run_command("git", &["add", "README.md", ".gitignore"], &root).unwrap();
+        run_command("git", &["commit", "-m", "initial"], &root).unwrap();
+
+        let mut workers = BTreeMap::new();
+        workers.insert(
+            "worker".to_string(),
+            WorkerConfig {
+                id: "worker".to_string(),
+                command: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+                max_concurrency: 1,
+                model: None,
+                enabled: true,
+                env: BTreeMap::new(),
+                worker_mode: "trusted-worktree".to_string(),
+                permission_mode: "bypassPermissions".to_string(),
+                description: "test".to_string(),
+                strengths: Vec::new(),
+                cost: "test".to_string(),
+                speed: "test".to_string(),
+                delegation_trust: "medium".to_string(),
+            },
+        );
+        let mut engine = SubDispatchEngine {
+            workspace: root.clone(),
+            tasks_dir: root.join(".subdispatch").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("slots"),
+            workers,
+            prompts: PromptConfig::default(),
+        };
+
+        engine
+            .start_task(json!({
+                "task_id": "first",
+                "worker": "worker",
+                "instruction": "do nothing"
+            }))
+            .unwrap();
+        engine
+            .start_task(json!({
+                "task_id": "second",
+                "worker": "worker",
+                "instruction": "do nothing"
+            }))
+            .unwrap();
+
+        let first = engine.read_task("first").unwrap();
+        assert_eq!(first.slot_id.as_deref(), Some("worker/slot-0"));
+        let slot_path = first.worktree.clone();
+        wait_for_task_status(&mut engine, "first", STATUS_COMPLETED);
+        engine.poll_tasks(json!({})).unwrap();
+        assert_eq!(engine.read_task("second").unwrap().status, STATUS_QUEUED);
+
+        engine.collect_task("first").unwrap();
+        engine.poll_tasks(json!({})).unwrap();
+        let second = engine.read_task("second").unwrap();
+        assert_eq!(second.slot_id.as_deref(), Some("worker/slot-0"));
+        assert_eq!(second.worktree, slot_path);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_worktree_refuses_slot_used_by_new_task() {
+        let root = env::temp_dir().join(format!("subdispatch-slot-delete-test-{}", now_secs()));
+        fs::create_dir_all(&root).unwrap();
+        run_command("git", &["init"], &root).unwrap();
+        run_command("git", &["config", "user.email", "test@example.com"], &root).unwrap();
+        run_command("git", &["config", "user.name", "SubDispatch Test"], &root).unwrap();
+        fs::write(root.join("README.md"), "initial\n").unwrap();
+        fs::write(root.join(".gitignore"), ".subdispatch/\n").unwrap();
+        run_command("git", &["add", "README.md", ".gitignore"], &root).unwrap();
+        run_command("git", &["commit", "-m", "initial"], &root).unwrap();
+
+        let mut workers = BTreeMap::new();
+        workers.insert(
+            "worker".to_string(),
+            WorkerConfig {
+                id: "worker".to_string(),
+                command: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+                max_concurrency: 1,
+                model: None,
+                enabled: true,
+                env: BTreeMap::new(),
+                worker_mode: "trusted-worktree".to_string(),
+                permission_mode: "bypassPermissions".to_string(),
+                description: "test".to_string(),
+                strengths: Vec::new(),
+                cost: "test".to_string(),
+                speed: "test".to_string(),
+                delegation_trust: "medium".to_string(),
+            },
+        );
+        let mut engine = SubDispatchEngine {
+            workspace: root.clone(),
+            tasks_dir: root.join(".subdispatch").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("slots"),
+            workers,
+            prompts: PromptConfig::default(),
+        };
+
+        engine
+            .start_task(json!({
+                "task_id": "first",
+                "worker": "worker",
+                "instruction": "do nothing"
+            }))
+            .unwrap();
+        wait_for_task_status(&mut engine, "first", STATUS_COMPLETED);
+        engine.collect_task("first").unwrap();
+        engine
+            .start_task(json!({
+                "task_id": "second",
+                "worker": "worker",
+                "instruction": "do nothing"
+            }))
+            .unwrap();
+
+        let err = engine.delete_worktree("first", false, false).unwrap_err();
+        assert!(err.contains("same slot"));
+        assert!(PathBuf::from(engine.read_task("second").unwrap().worktree).exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completed_task_holds_slot_until_collected() {
+        let mut first = test_task(Path::new("/tmp/subdispatch-slot-test"), None);
+        first.worker = "worker".to_string();
+        first.slot_id = Some("worker/slot-0".to_string());
+        first.status = STATUS_COMPLETED.to_string();
+        first.collected_at = None;
+        assert!(task_holds_slot(&first));
+        assert_eq!(task_slot_index(&first), Some(0));
+
+        first.collected_at = Some(now_secs());
+        assert!(!task_holds_slot(&first));
+
+        let mut running = first.clone();
+        running.status = STATUS_RUNNING.to_string();
+        assert!(task_holds_slot(&running));
+    }
+
+    #[test]
     fn start_task_rejects_dirty_workspace() {
         let root = env::temp_dir().join(format!("subdispatch-dirty-test-{}", now_secs()));
         fs::create_dir_all(&root).unwrap();
@@ -1945,7 +2276,7 @@ mod tests {
         let mut engine = SubDispatchEngine {
             workspace: root.clone(),
             tasks_dir: root.join(".subdispatch").join("tasks"),
-            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("slots"),
             workers: BTreeMap::new(),
             prompts: PromptConfig::default(),
         };
@@ -1992,7 +2323,7 @@ mod tests {
         let mut engine = SubDispatchEngine {
             workspace: root.clone(),
             tasks_dir: root.join(".subdispatch").join("tasks"),
-            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("slots"),
             workers,
             prompts: PromptConfig::default(),
         };
@@ -2009,7 +2340,7 @@ mod tests {
         assert!(!root
             .join(".subdispatch")
             .join("worktrees")
-            .join("tasks")
+            .join("slots")
             .join("conflict")
             .exists());
 
@@ -2075,7 +2406,7 @@ mod tests {
         let engine = SubDispatchEngine {
             workspace: root.clone(),
             tasks_dir: root.join(".subdispatch").join("tasks"),
-            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("slots"),
             workers: BTreeMap::new(),
             prompts: PromptConfig::default(),
         };
@@ -2122,7 +2453,7 @@ mod tests {
         let engine = SubDispatchEngine {
             workspace: root.clone(),
             tasks_dir: root.join(".subdispatch").join("tasks"),
-            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("slots"),
             workers: BTreeMap::new(),
             prompts: PromptConfig::default(),
         };
@@ -2142,7 +2473,7 @@ mod tests {
 
     #[test]
     fn forbidden_path_attempts_report_transient_pretool_edits() {
-        let line = r#"{"recorded_at":1.0,"hook_event_name":"PreToolUse","tool_name":"Edit","raw":{"tool_input":{"file_path":"/repo/.subdispatch/worktrees/tasks/storage-parent-dirs/Cargo.toml"}}}"#;
+        let line = r#"{"recorded_at":1.0,"hook_event_name":"PreToolUse","tool_name":"Edit","raw":{"tool_input":{"file_path":"/repo/.subdispatch/worktrees/slots/glm/slot-0/Cargo.toml"}}}"#;
         let attempts = compact_forbidden_attempt_line(line, &["Cargo.toml".to_string()]).unwrap();
         assert_eq!(attempts["tool_name"], "Edit");
         assert_eq!(attempts["file_path"], "Cargo.toml");
@@ -2151,7 +2482,7 @@ mod tests {
 
     #[test]
     fn forbidden_path_attempts_ignore_result_manifest_write() {
-        let line = r#"{"recorded_at":1.0,"hook_event_name":"PreToolUse","tool_name":"Write","raw":{"tool_input":{"file_path":"/repo/.subdispatch/worktrees/tasks/example/.subdispatch/result.json"}}}"#;
+        let line = r#"{"recorded_at":1.0,"hook_event_name":"PreToolUse","tool_name":"Write","raw":{"tool_input":{"file_path":"/repo/.subdispatch/worktrees/slots/glm/slot-0/.subdispatch/result.json"}}}"#;
         assert!(compact_forbidden_attempt_line(line, &[".subdispatch".to_string()]).is_none());
     }
 
@@ -2161,7 +2492,7 @@ mod tests {
         let engine = SubDispatchEngine {
             workspace: root.clone(),
             tasks_dir: root.join(".subdispatch").join("tasks"),
-            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("slots"),
             workers: BTreeMap::new(),
             prompts: PromptConfig::default(),
         };
@@ -2201,6 +2532,7 @@ mod tests {
             branch: "agent/task".to_string(),
             worktree: root.join("worktree").display().to_string(),
             base_commit: "base".to_string(),
+            slot_id: None,
             read_scope: Vec::new(),
             write_scope: Vec::new(),
             forbidden_paths: Vec::new(),
@@ -2219,6 +2551,7 @@ mod tests {
             warning: None,
             worktree_removed: None,
             worktree_deleted_at: None,
+            collected_at: None,
         }
     }
 }

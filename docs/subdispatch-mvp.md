@@ -20,10 +20,12 @@ SubDispatch tracks two entities:
 
 - `Worker`: a configured external coding-agent command. The default is
   `claude-code`.
-- `Task`: one child-agent execution in its own branch and git worktree.
+- `Task`: one child-agent execution with its own branch, assigned to a reusable
+  worker-slot git worktree.
 
-Each task records its base commit, branch, worktree path, process id, logs,
-result manifest path, Claude hook/session evidence, and artifact directory.
+Each task records its base commit, branch, slot id, worktree path, process id,
+logs, result manifest path, Claude hook/session evidence, and artifact
+directory.
 
 ## Configuration
 
@@ -94,15 +96,16 @@ it does not replace scope control, review, or validation.
 
 ### `start_task`
 
-Starts one primary-LLM supplied child task. SubDispatch creates a branch and
-worktree, writes a task prompt, and starts the configured worker when capacity
-is available. A task over the worker concurrency limit stays queued.
+Starts one primary-LLM supplied child task. SubDispatch creates a branch,
+assigns a reusable worker-slot worktree when capacity is available, writes a
+task prompt, and starts the configured worker. A task over the worker
+concurrency limit or waiting for an uncollected slot stays queued.
 
 Delegation requires a clean committed checkpoint. The primary agent owns its own
 branch/worktree strategy and must commit any in-progress changes before calling
 `start_task`. SubDispatch does not manage a hidden integration branch. If the
 workspace has uncommitted changes, `start_task` returns an error instead of
-creating a child worktree.
+creating a task or occupying a slot.
 
 If `base`/`base_branch` is omitted, the task starts from the current `HEAD`.
 Passing `base` remains an explicit override for special cases.
@@ -110,6 +113,10 @@ Passing `base` remains an explicit override for special cases.
 Parallelism is explicit: the primary agent calls `start_task` multiple times,
 selects workers based on available slots and task fit, then reviews each result
 independently.
+
+Physical worktrees are persistent per worker slot. A completed task keeps its
+slot until `collect_task` captures artifact evidence; only then may a later task
+reuse that slot.
 
 ### `poll_tasks`
 
@@ -160,19 +167,27 @@ The returned artifact includes:
 - patch path
 - base commit
 - task branch
+- slot id
 - write-scope check
 - forbidden-path check
 
+After collection, repeated `collect_task` calls return the stored artifact so
+evidence remains stable even if the physical slot is reused.
+
 ### `delete_worktree`
 
-Deletes one SubDispatch-managed task worktree. It refuses to delete a running
-task unless forced. By default it preserves the branch and artifact directory.
+Deletes one SubDispatch-managed slot worktree. This is a maintenance operation,
+not the normal task completion path. Normal flow is to collect evidence and keep
+the slot for reuse. It refuses to delete a running task, an uncollected task, or
+a slot held by another task unless forced. By default it preserves the branch
+and artifact directory.
 
 ## Hard constraints
 
 - Child agents never run in the primary worktree.
 - Every task has its own branch.
-- Every task has its own worktree.
+- Physical worktrees are reusable per-worker slots; one slot serves at most one
+  uncollected task at a time.
 - Every task records a base commit.
 - `collect_task` uses Git as the source of truth.
 - Worktree deletion verifies the target is under the SubDispatch worktree root.

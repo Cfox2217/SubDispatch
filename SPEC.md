@@ -9,7 +9,7 @@ artifact collection, and worktree cleanup.
 
 The philosophy: let the primary agent think; let SubDispatch handle execution.
 
-Tagline: Parallel child agents, isolated worktrees.
+Tagline: Parallel child agents, reusable isolated worktree slots.
 
 ## Architecture
 
@@ -18,14 +18,14 @@ Primary LLM (Codex / Claude Code)
   ↓
 SubDispatch MCP Server / CLI
   ├─ list_workers    (capacity + availability)
-  ├─ start_task      (create one task worktree and dispatch worker)
+  ├─ start_task      (create one task branch, assign a worker slot, dispatch worker)
   ├─ poll_tasks      (refresh task status, start queued tasks)
   ├─ collect_task    (git diff, artifact collection)
-  └─ delete_worktree (cleanup, preserve artifacts)
+  └─ delete_worktree (slot maintenance, preserve artifacts)
   ↓
 Claude Code or compatible external code-agent CLI
   ↓
-Isolated Git Worktrees
+Reusable Isolated Git Worktree Slots
 ```
 
 SubDispatch registers as an MCP server via project-level MCP configuration. The
@@ -58,7 +58,8 @@ The Python MVP has been removed. The Rust binary is the only runtime path.
 
 - `task_id`: unique task identifier
 - `branch`: dedicated git branch
-- `worktree`: isolated git worktree path
+- `slot_id`: reusable worker slot identifier, for example `glm/slot-0`
+- `worktree`: isolated slot worktree path
 - `base_commit`: committed checkpoint used as the task base
 - `status`: `queued` | `running` | `completed` | `failed` | `cancelled` | `missing`
 - `instruction`: original child-agent prompt
@@ -102,7 +103,8 @@ how aggressively to delegate clear tasks to a worker.
 
 ### `start_task`
 
-Creates one task branch/worktree and dispatches one worker:
+Creates one task branch, assigns one worker slot worktree when capacity is
+available, and dispatches one worker:
 
 ```json
 {
@@ -129,17 +131,23 @@ Response:
     "task_id": "prompt_validation_tests",
     "status": "running",
     "branch": "agent/prompt_validation_tests",
-    "worktree": ".subdispatch/worktrees/tasks/prompt_validation_tests"
+    "slot_id": "glm/slot-0",
+    "worktree": ".subdispatch/worktrees/slots/glm/slot-0"
   }
 }
 ```
 
 Delegation requires a clean committed primary workspace. If the workspace has
-uncommitted changes, `start_task` fails without creating a child worktree.
+uncommitted changes, `start_task` fails without creating a task or occupying a
+slot.
 `read_scope`/`write_scope` must not overlap `forbidden_paths`. Contradictory
-scope contracts are rejected before task directory or worktree creation. The
+scope contracts are rejected before task directory or slot assignment. The
 managed result manifest path is the only expected internal `.subdispatch`
 write by a child task.
+
+Physical worktrees are persistent per worker slot, not per task. A completed or
+failed task keeps its slot until `collect_task` captures its artifact evidence.
+Only after collection can the scheduler reuse that slot for another task.
 
 ### `poll_tasks`
 
@@ -192,15 +200,18 @@ Response includes:
 - patch path
 - base commit
 - task branch
+- slot id
 - write-scope check
 - forbidden-path check
 
 Git diff is the source of truth. The worker manifest is only self-reported
-evidence.
+evidence. After the first successful collection, repeated `collect_task` calls
+return the stored artifact so old task evidence is not affected by later slot
+reuse.
 
 ### `delete_worktree`
 
-Deletes one managed task worktree:
+Deletes one managed slot worktree:
 
 ```json
 {
@@ -210,14 +221,17 @@ Deletes one managed task worktree:
 }
 ```
 
-The command refuses to delete a running task unless `force=true`. Branch deletion
-must be explicit.
+This is a maintenance operation, not the normal task completion path. The normal
+path is to collect evidence and leave the slot available for reuse. The command
+refuses to delete a running task, an uncollected task, or a slot currently held
+by another task unless `force=true`. Branch deletion must be explicit.
 
 ## Hard Constraints
 
 1. Child agents never run in the primary worktree.
 2. Every task has its own branch.
-3. Every task has its own worktree.
+3. Physical worktrees are reusable per-worker slots; one slot serves at most one
+   uncollected task at a time.
 4. Every task records a base commit.
 5. `start_task` refuses dirty primary workspaces.
 6. `collect_task` uses Git as the source of truth.

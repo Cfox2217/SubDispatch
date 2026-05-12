@@ -225,7 +225,7 @@ fn default_mcp_list_workers() -> String {
 }
 
 fn default_mcp_start_task() -> String {
-    "启动一个 child coding-agent task，并在隔离的 git worktree/branch 中执行。适用于边界清晰、read/write scope 明确、可以交给外部 code agent 独立完成的工作。调用前，primary agent 必须位于自己的 branch/worktree，并提交 checkpoint，让 workspace 保持 clean；start_task 会拒绝未提交改动。未传 base/base_branch 时，child task branch 从当前 HEAD 派生。需要并行时多次调用 start_task，由 primary agent 自己决定拆分、调度、review 和合并。instruction 必须精确；write_scope 尽量窄；敏感区域放入 forbidden_paths；不要把 read_scope 或 write_scope 中允许的路径同时放进 forbidden_paths，否则任务会被拒绝。只有指定的 result manifest 路径可作为内部产物写入。只有 child 确实需要额外背景时才传 context/context_files。".to_string()
+    "启动一个 child coding-agent task。SubDispatch 会为 task 创建独立 branch，并在容量可用时分配对应 worker 的可复用隔离 worktree slot；超过并发或 slot 尚未 collect 释放时会排队。适用于边界清晰、read/write scope 明确、可以交给外部 code agent 独立完成的工作。调用前，primary agent 必须位于自己的 branch/worktree，并提交 checkpoint，让 workspace 保持 clean；start_task 会拒绝未提交改动。未传 base/base_branch 时，child task branch 从当前 HEAD 派生。需要并行时多次调用 start_task，由 primary agent 自己决定拆分、调度、review 和合并。instruction 必须精确；write_scope 尽量窄；敏感区域放入 forbidden_paths；不要把 read_scope 或 write_scope 中允许的路径同时放进 forbidden_paths，否则任务会被拒绝。只有指定的 result manifest 路径可作为内部产物写入。只有 child 确实需要额外背景时才传 context/context_files。".to_string()
 }
 
 fn default_mcp_poll_tasks() -> String {
@@ -233,11 +233,11 @@ fn default_mcp_poll_tasks() -> String {
 }
 
 fn default_mcp_collect_task() -> String {
-    "收集一个 child task 的 evidence bundle：Git diff、changed files、logs、manifest、hook summary、recent hook events、验证命令结果 tail、forbidden-path attempt tail、scope checks 和 forbidden-path checks。Git diff 是事实来源；child manifest 只是 worker 自述。验证命令结果用于确认测试失败/修复过程；forbidden-path attempts 用于发现 child 曾经尝试读写越界路径，即使最终 diff 已撤回。primary agent 负责 review，并决定 apply、merge、cherry-pick 或 discard。".to_string()
+    "收集一个 child task 的 evidence bundle：Git diff、changed files、logs、manifest、hook summary、recent hook events、验证命令结果 tail、forbidden-path attempt tail、scope checks、forbidden-path checks 和 slot_id。Git diff 是事实来源；child manifest 只是 worker 自述。collect_task 会固化 artifact，之后该物理 slot 才能安全复用；重复 collect 同一 task 会返回已保存的 artifact，避免被后续 slot 复用影响。primary agent 负责 review，并决定 apply、merge、cherry-pick 或 discard。".to_string()
 }
 
 fn default_mcp_delete_worktree() -> String {
-    "删除一个由 SubDispatch 管理的 task worktree。仅在 primary agent 已不再需要该 worktree 后调用。默认拒绝删除 running task，除非 force=true。删除 branch 必须显式传 delete_branch=true；只应在 review 完成或明确丢弃任务结果后使用。".to_string()
+    "删除一个由 SubDispatch 管理的 slot worktree。这是谨慎的维护动作，不是任务完成后的常规清理；正常流程是 collect_task 固化证据后让 slot 继续复用。默认拒绝删除 running、未 collect，或正被其他 task 占用的 slot，除非 force=true。删除 branch 必须显式传 delete_branch=true；只应在明确要回收物理 slot 或丢弃异常现场时使用。".to_string()
 }
 
 fn default_child_template() -> String {

@@ -25,9 +25,12 @@ Claude hook 记录和本地 Setup/Activity UI。
 SubDispatch 追踪两个实体：
 
 - `Worker`：已配置的外部编码代理命令。默认使用 `claude-code`。
-- `Task`：在独立分支和 git 工作树中执行的子代理。
+- `Task`：一次子代理执行，拥有独立分支，并占用某个 worker 的可复用 git 工作树槽位。
 
-每个任务记录其基础提交、分支、工作树路径、进程 ID、日志、结果清单路径和产物目录。
+每个任务记录其基础提交、分支、slot id、工作树路径、进程 ID、日志、结果清单路径和产物目录。
+物理工作树按 worker 并发槽位复用，例如 `.subdispatch/worktrees/slots/glm/slot-0`。
+任务完成后不会立刻释放 slot；必须先调用 `collect_task` 固化 diff、日志和 manifest
+证据，SubDispatch 才会允许后续任务复用同一个 slot。
 
 ## 配置
 
@@ -90,12 +93,13 @@ MCP 工具名是 `list_workers`；CLI 对应命令是
 
 ### `start_task`
 
-启动一个主 LLM 提供的 child task。SubDispatch 为该任务创建分支和工作树、
-写入任务提示词，并在容量可用时启动已配置的 worker。超过 worker 并发限制时，该任务保持排队。
+启动一个主 LLM 提供的 child task。SubDispatch 为该任务创建独立分支，
+在容量可用时分配对应 worker 的可复用 slot 工作树，写入任务提示词并启动已配置的 worker。
+超过 worker 并发限制或 slot 尚未被 collect 释放时，该任务保持排队。
 
 委托前必须有一个干净的已提交 checkpoint。主代理自己决定使用哪个分支或工作树，
 并在调用 `start_task` 前提交当前改动。SubDispatch 不管理隐藏的集成分支。
-如果工作区存在未提交改动，`start_task` 会直接返回错误，不创建子工作树。
+如果工作区存在未提交改动，`start_task` 会直接返回错误，不创建任务或占用 slot。
 未传 `base`/`base_branch` 时，任务默认从当前 `HEAD` 启动；显式传入 `base`
 仍可覆盖这个默认行为。
 
@@ -106,7 +110,7 @@ worker，然后分别 poll、collect、review，并自行决定如何合并。
 这是把未提交 diff、临时审计说明或其他不在子 worktree 基础提交中的信息交给子代理的正确方式。
 
 `read_scope`/`write_scope` 不能和 `forbidden_paths` 重叠。SubDispatch 会在创建
-task worktree 前拒绝这种自相矛盾的 scope contract。子任务唯一应该写入的内部
+任务记录或占用 slot 前拒绝这种自相矛盾的 scope contract。子任务唯一应该写入的内部
 `.subdispatch` 文件是受管理的 result manifest 路径。
 
 ### `poll_tasks`
@@ -140,22 +144,27 @@ task worktree 前拒绝这种自相矛盾的 scope contract。子任务唯一应
 - 补丁路径
 - 基础提交
 - 任务分支
+- slot id
 - 写作用域检查
 - 禁止路径检查
 
 worker 清单只是子代理自述。Git diff、scope checks、
 `transcript_tool_results_tail` 和 `forbidden_path_attempts_tail` 是更强的审查证据。
+`collect_task` 会把证据写入 artifact；之后即使物理 slot 被新任务复用，再次
+collect 同一任务也会返回已固化的 artifact。
 
 ### `delete_worktree`
 
-删除一个 SubDispatch 管理的任务工作树。除非强制执行，否则拒绝删除运行中的任务。
+删除一个 SubDispatch 管理的 slot 工作树。这是维护动作，不是任务结束后的常规步骤。
+正常流程是 `collect_task` 后让 slot 留给后续任务复用。除非强制执行，否则
+`delete_worktree` 会拒绝删除运行中、未 collect，或正被其他任务占用的 slot。
 默认保留分支和产物目录。
 
 ## 硬约束
 
 - 子代理永不运行在主工作树中。
 - 每个任务有独立的分支。
-- 每个任务有独立的工作树。
+- 物理工作树按 worker slot 复用；同一时刻一个 slot 只服务一个未 collect 的任务。
 - 每个任务记录基础提交。
 - `start_task` 拒绝脏主工作区。
 - `collect_task` 使用 Git 作为事实来源。
