@@ -150,6 +150,11 @@ impl SubDispatchEngine {
     }
 
     pub fn start_task(&mut self, input: Value) -> Result<Value, String> {
+        let _lock = self.acquire_state_lock()?;
+        self.start_task_locked(input)
+    }
+
+    fn start_task_locked(&mut self, input: Value) -> Result<Value, String> {
         self.ensure_git_repo()?;
         self.require_clean_workspace()?;
         let instruction = required_string(&input, "instruction")?;
@@ -242,6 +247,7 @@ impl SubDispatchEngine {
     }
 
     pub fn poll_tasks(&mut self, input: Value) -> Result<Value, String> {
+        let _lock = self.acquire_state_lock()?;
         self.refresh_all_tasks()?;
         self.schedule_queued_tasks()?;
         self.refresh_all_tasks()?;
@@ -266,6 +272,7 @@ impl SubDispatchEngine {
     }
 
     pub fn collect_task(&mut self, task_id: &str) -> Result<Value, String> {
+        let _lock = self.acquire_state_lock()?;
         self.refresh_task(task_id)?;
         let task = self.read_task(task_id)?;
         let task_dir = self.task_dir(task_id);
@@ -309,6 +316,7 @@ impl SubDispatchEngine {
         force: bool,
         delete_branch: bool,
     ) -> Result<Value, String> {
+        let _lock = self.acquire_state_lock()?;
         self.refresh_task(task_id)?;
         let mut task = self.read_task(task_id)?;
         if task.status == STATUS_RUNNING && !force {
@@ -350,6 +358,7 @@ impl SubDispatchEngine {
     }
 
     pub fn activity_snapshot(&mut self) -> Result<Value, String> {
+        let _lock = self.acquire_state_lock()?;
         self.refresh_all_tasks()?;
         self.schedule_queued_tasks()?;
         self.refresh_all_tasks()?;
@@ -955,6 +964,56 @@ impl SubDispatchEngine {
     fn write_task(&self, task: &TaskState) -> Result<(), String> {
         write_json(&self.task_dir(&task.id).join("task.json"), task)
     }
+
+    fn acquire_state_lock(&self) -> Result<StateLock, String> {
+        StateLock::acquire(&self.workspace.join(".subdispatch").join("state.lock"))
+    }
+}
+
+struct StateLock {
+    path: PathBuf,
+}
+
+impl StateLock {
+    fn acquire(path: &Path) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+        }
+        let timeout = Duration::from_secs(30);
+        let started = SystemTime::now();
+        loop {
+            match fs::create_dir(path) {
+                Ok(()) => {
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let waited = started.elapsed().unwrap_or_default();
+                    if waited >= timeout {
+                        return Err(format!(
+                            "timed out waiting for SubDispatch state lock: {}",
+                            path.display()
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "failed to acquire SubDispatch state lock {}: {err}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
 }
 
 pub fn supervise(launch_json: &Path) -> Result<(), String> {
@@ -1522,8 +1581,45 @@ fn write_json<T: Serialize + ?Sized>(path: &Path, data: &T) -> Result<(), String
     }
     let text = serde_json::to_string_pretty(data)
         .map_err(|err| format!("failed to serialize JSON: {err}"))?;
-    fs::write(path, format!("{text}\n"))
-        .map_err(|err| format!("failed to write {}: {err}", path.display()))
+    atomic_write(path, format!("{text}\n").as_bytes())
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("path has no file name: {}", path.display()))?;
+    let tmp_path = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        unique_suffix()
+    ));
+    {
+        let mut file = fs::File::create(&tmp_path)
+            .map_err(|err| format!("failed to create {}: {err}", tmp_path.display()))?;
+        file.write_all(contents)
+            .map_err(|err| format!("failed to write {}: {err}", tmp_path.display()))?;
+        file.sync_all()
+            .map_err(|err| format!("failed to sync {}: {err}", tmp_path.display()))?;
+    }
+    fs::rename(&tmp_path, path).map_err(|err| {
+        let _ = fs::remove_file(&tmp_path);
+        format!(
+            "failed to replace {} with {}: {err}",
+            path.display(),
+            tmp_path.display()
+        )
+    })
+}
+
+fn unique_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 fn tail(path: &Path, limit: usize) -> Result<String, String> {
@@ -1696,6 +1792,140 @@ mod tests {
 
         let files = expand_status_path(&root, "docs/agent-reports/").unwrap();
         assert_eq!(files, vec!["docs/agent-reports/report.md".to_string()]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn state_lock_serializes_callers() {
+        let root = env::temp_dir().join(format!("subdispatch-lock-test-{}", now_secs()));
+        fs::create_dir_all(&root).unwrap();
+        let lock_path = root.join(".subdispatch").join("state.lock");
+        let first_lock = StateLock::acquire(&lock_path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let second_lock_path = lock_path.clone();
+        let handle = thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let _second_lock = StateLock::acquire(&second_lock_path).unwrap();
+            tx.send(started.elapsed()).unwrap();
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(rx.try_recv().is_err());
+        drop(first_lock);
+
+        let waited = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(waited >= Duration::from_millis(75));
+        handle.join().unwrap();
+        assert!(!lock_path.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn write_json_replaces_existing_file_atomically() {
+        let root = env::temp_dir().join(format!("subdispatch-atomic-json-test-{}", now_secs()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("task.json");
+        fs::write(&path, "previous").unwrap();
+
+        write_json(&path, &json!({ "status": "ok" })).unwrap();
+
+        let value: Value = read_json(&path).unwrap();
+        assert_eq!(value["status"], "ok");
+        let leftovers = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_start_task_serializes_state_writes() {
+        let root = env::temp_dir().join(format!("subdispatch-concurrent-test-{}", now_secs()));
+        fs::create_dir_all(&root).unwrap();
+        run_command("git", &["init"], &root).unwrap();
+        run_command("git", &["config", "user.email", "test@example.com"], &root).unwrap();
+        run_command("git", &["config", "user.name", "SubDispatch Test"], &root).unwrap();
+        fs::write(root.join("README.md"), "initial\n").unwrap();
+        fs::write(root.join(".gitignore"), ".subdispatch/\n").unwrap();
+        run_command("git", &["add", "README.md", ".gitignore"], &root).unwrap();
+        run_command("git", &["commit", "-m", "initial"], &root).unwrap();
+
+        let mut handles = Vec::new();
+        for index in 0..4 {
+            let workspace = root.clone();
+            handles.push(thread::spawn(move || {
+                let mut workers = BTreeMap::new();
+                workers.insert(
+                    "worker".to_string(),
+                    WorkerConfig {
+                        id: "worker".to_string(),
+                        command: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+                        max_concurrency: 1,
+                        model: None,
+                        enabled: false,
+                        env: BTreeMap::new(),
+                        worker_mode: "trusted-worktree".to_string(),
+                        permission_mode: "bypassPermissions".to_string(),
+                        description: "test".to_string(),
+                        strengths: Vec::new(),
+                        cost: "test".to_string(),
+                        speed: "test".to_string(),
+                        delegation_trust: "medium".to_string(),
+                    },
+                );
+                let mut engine = SubDispatchEngine {
+                    workspace: workspace.clone(),
+                    tasks_dir: workspace.join(".subdispatch").join("tasks"),
+                    worktrees_dir: workspace
+                        .join(".subdispatch")
+                        .join("worktrees")
+                        .join("tasks"),
+                    workers,
+                    prompts: PromptConfig::default(),
+                };
+                engine
+                    .start_task(json!({
+                        "task_id": format!("task_{index}"),
+                        "worker": "worker",
+                        "instruction": "do nothing"
+                    }))
+                    .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let engine = SubDispatchEngine {
+            workspace: root.clone(),
+            tasks_dir: root.join(".subdispatch").join("tasks"),
+            worktrees_dir: root.join(".subdispatch").join("worktrees").join("tasks"),
+            workers: BTreeMap::new(),
+            prompts: PromptConfig::default(),
+        };
+        let tasks = engine.all_tasks().unwrap();
+        assert_eq!(tasks.len(), 4);
+        for task in tasks {
+            assert!(matches!(
+                task.status.as_str(),
+                STATUS_QUEUED | STATUS_FAILED
+            ));
+        }
+        assert!(!root.join(".subdispatch").join("state.lock").exists());
+        let tmp_files = fs::read_dir(root.join(".subdispatch").join("tasks"))
+            .unwrap()
+            .flat_map(|entry| fs::read_dir(entry.unwrap().path()).unwrap())
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(tmp_files.is_empty(), "{tmp_files:?}");
 
         fs::remove_dir_all(root).unwrap();
     }
