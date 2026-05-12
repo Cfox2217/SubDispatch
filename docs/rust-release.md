@@ -39,20 +39,27 @@ for:
 
 ## Install
 
-Place `subdispatch` on `PATH`, then initialize a workspace:
+Place `subdispatch` on `PATH`, install the global MCP entry and bundled skill
+once:
 
 ```bash
-subdispatch init-env --workspace .
-subdispatch install --project --workspace .
+subdispatch install --global
 subdispatch install-skill
+```
+
+Then initialize each project separately:
+
+```bash
+cd /path/to/project
+subdispatch init-env --workspace .
 subdispatch doctor --workspace .
 ```
 
-Global MCP install is available when the user intentionally wants SubDispatch
-for all Codex workspaces:
+Project-local MCP install is still available when a project should pin a
+specific binary or workspace:
 
 ```bash
-subdispatch install --global --workspace /absolute/path/to/project
+subdispatch install --project --workspace .
 ```
 
 The release archive includes the bundled Codex skill under

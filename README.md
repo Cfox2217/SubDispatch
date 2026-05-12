@@ -206,11 +206,18 @@ CLI.
 
 ## Install And Release
 
-Install MCP config for the current project:
+Install the global MCP entry and bundled skill once:
 
 ```bash
-subdispatch install --project --workspace .
 subdispatch install-skill
+subdispatch install --global
+```
+
+Then initialize each project:
+
+```bash
+cd /path/to/project
+subdispatch init-env --workspace .
 subdispatch doctor --workspace .
 ```
 

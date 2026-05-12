@@ -81,10 +81,10 @@ enum Command {
         #[arg(long)]
         delete_branch: bool,
     },
-    /// Run the MCP stdio server.
+    /// Run the MCP stdio server. Defaults to the client-provided current directory.
     Mcp {
-        #[arg(long, default_value = ".")]
-        workspace: PathBuf,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
     /// Serve the local Setup and Activity UI.
     Serve {

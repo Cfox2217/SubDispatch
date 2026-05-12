@@ -16,14 +16,14 @@ pub fn install(workspace: &Path, project: bool, global: bool) -> Result<Value, S
         actions.push(install_config(
             &workspace.join(".codex").join("config.toml"),
             &exe,
-            workspace,
+            Some(workspace),
         )?);
     }
     if global {
         actions.push(install_config(
             &home_dir()?.join(".codex").join("config.toml"),
             &exe,
-            workspace,
+            None,
         )?);
     }
     Ok(json!({
@@ -31,7 +31,7 @@ pub fn install(workspace: &Path, project: bool, global: bool) -> Result<Value, S
         "workspace": workspace.display().to_string(),
         "binary": exe,
         "actions": actions,
-        "next_step": "Run `subdispatch doctor --workspace .` to verify the installation."
+        "next_step": "Run `subdispatch init-env --workspace .` in each project, edit .env, then run `subdispatch doctor --workspace .`."
     }))
 }
 
@@ -114,7 +114,11 @@ pub fn install_skill() -> Result<Value, String> {
     }))
 }
 
-fn install_config(config_path: &Path, binary: &str, workspace: &Path) -> Result<Value, String> {
+fn install_config(
+    config_path: &Path,
+    binary: &str,
+    workspace: Option<&Path>,
+) -> Result<Value, String> {
     let existing = if config_path.exists() {
         fs::read_to_string(config_path)
             .map_err(|err| format!("failed to read {}: {err}", config_path.display()))?
@@ -133,16 +137,29 @@ fn install_config(config_path: &Path, binary: &str, workspace: &Path) -> Result<
         "config_path": config_path.display().to_string(),
         "installed": true,
         "command": binary,
-        "args": ["mcp", "--workspace", workspace.display().to_string()]
+        "args": render_args(workspace)
     }))
 }
 
-fn render_section(binary: &str, workspace: &Path) -> String {
+fn render_section(binary: &str, workspace: Option<&Path>) -> String {
+    let args = match workspace {
+        Some(workspace) => format!(
+            "[\"mcp\", \"--workspace\", \"{}\"]",
+            escape_toml_string(&workspace.display().to_string())
+        ),
+        None => "[\"mcp\"]".to_string(),
+    };
     format!(
-        "{SECTION_HEADER}\ncommand = \"{}\"\nargs = [\"mcp\", \"--workspace\", \"{}\"]\nstartup_timeout_sec = 10\ntool_timeout_sec = 120\n",
+        "{SECTION_HEADER}\ncommand = \"{}\"\nargs = {args}\nstartup_timeout_sec = 10\ntool_timeout_sec = 120\n",
         escape_toml_string(binary),
-        escape_toml_string(&workspace.display().to_string())
     )
+}
+
+fn render_args(workspace: Option<&Path>) -> Value {
+    match workspace {
+        Some(workspace) => json!(["mcp", "--workspace", workspace.display().to_string()]),
+        None => json!(["mcp"]),
+    }
 }
 
 fn replace_section(existing: &str, section: &str) -> String {
@@ -237,7 +254,7 @@ fn recommended_next_step(env_exists: bool, mcp_installed: bool, ready: bool) -> 
     } else if !env_exists {
         "Run `subdispatch init-env --workspace .`, edit .env, then rerun doctor."
     } else if !mcp_installed {
-        "Run `subdispatch install --project --workspace .` or `subdispatch install --global --workspace .`."
+        "Run `subdispatch install --global`, or use `subdispatch install --project --workspace .` for project-local MCP config."
     } else {
         "Check worker command availability and .env worker settings."
     }
@@ -255,5 +272,18 @@ mod tests {
         assert!(updated.contains("command = \"new\""));
         assert!(updated.contains("[y]\nb = 2"));
         assert!(!updated.contains("command = \"old\""));
+    }
+
+    #[test]
+    fn global_section_does_not_pin_workspace() {
+        let section = render_section("/usr/local/bin/subdispatch", None);
+        assert!(section.contains("args = [\"mcp\"]"));
+        assert!(!section.contains("--workspace"));
+    }
+
+    #[test]
+    fn project_section_pins_workspace() {
+        let section = render_section("/usr/local/bin/subdispatch", Some(Path::new("/repo")));
+        assert!(section.contains("args = [\"mcp\", \"--workspace\", \"/repo\"]"));
     }
 }

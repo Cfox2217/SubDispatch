@@ -1,12 +1,13 @@
 use crate::engine::SubDispatchEngine;
 use crate::prompts::{load_prompt_config, McpPrompts};
 use serde_json::{json, Value};
+use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 const JSONRPC: &str = "2.0";
 
-pub fn serve_stdio(workspace: PathBuf) -> Result<(), String> {
+pub fn serve_stdio(workspace: Option<PathBuf>) -> Result<(), String> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
@@ -44,7 +45,7 @@ pub fn serve_stdio(workspace: PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_request(workspace: &PathBuf, request: &Value) -> Result<Option<Value>, String> {
+fn handle_request(workspace: &Option<PathBuf>, request: &Value) -> Result<Option<Value>, String> {
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     match method {
         "initialize" => Ok(Some(json!({
@@ -54,7 +55,8 @@ fn handle_request(workspace: &PathBuf, request: &Value) -> Result<Option<Value>,
         }))),
         "notifications/initialized" => Ok(None),
         "tools/list" => {
-            let prompts = load_prompt_config(workspace)?;
+            let workspace = resolve_workspace(workspace, request)?;
+            let prompts = load_prompt_config(&workspace)?;
             Ok(Some(
                 json!({ "tools": tool_schemas_with_prompts(&prompts.mcp) }),
             ))
@@ -66,7 +68,8 @@ fn handle_request(workspace: &PathBuf, request: &Value) -> Result<Option<Value>,
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let mut engine = SubDispatchEngine::new(workspace.clone())?;
+            let workspace = resolve_workspace(workspace, request)?;
+            let mut engine = SubDispatchEngine::new(workspace)?;
             let result = match name {
                 "list_workers" => engine.list_workers()?,
                 "start_task" => engine.start_task(arguments)?,
@@ -95,6 +98,20 @@ fn handle_request(workspace: &PathBuf, request: &Value) -> Result<Option<Value>,
         }
         _ => Err(format!("Unsupported method: {method}")),
     }
+}
+
+fn resolve_workspace(configured: &Option<PathBuf>, request: &Value) -> Result<PathBuf, String> {
+    if let Some(workspace) = configured {
+        return Ok(workspace.clone());
+    }
+    if let Some(root) = request
+        .pointer("/params/_meta/cwd")
+        .or_else(|| request.pointer("/params/_meta/workspace"))
+        .and_then(Value::as_str)
+    {
+        return Ok(PathBuf::from(root));
+    }
+    env::current_dir().map_err(|err| format!("failed to read current directory: {err}"))
 }
 
 fn write_response(

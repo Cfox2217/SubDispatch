@@ -186,11 +186,18 @@ Web UI 不是任务创建控制台，只做 Setup 检查、`.env` 初始化、wo
 
 ## 安装与发布
 
-为当前项目安装 MCP 配置：
+全局安装 MCP 入口和内置 skill 一次：
 
 ```bash
-subdispatch install --project --workspace .
 subdispatch install-skill
+subdispatch install --global
+```
+
+然后在每个项目中初始化：
+
+```bash
+cd /path/to/project
+subdispatch init-env --workspace .
 subdispatch doctor --workspace .
 ```
 
