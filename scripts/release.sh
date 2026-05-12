@@ -14,9 +14,9 @@ cargo build --release
 rm -rf "$TARGET_DIR/$NAME"
 mkdir -p "$TARGET_DIR/$NAME"
 cp "$ROOT/target/release/subdispatch" "$TARGET_DIR/$NAME/subdispatch"
-cp "$ROOT/README.md" "$TARGET_DIR/$NAME/README.md"
-cp "$ROOT/README_en.md" "$TARGET_DIR/$NAME/README_en.md"
-cp "$ROOT/README_zh.md" "$TARGET_DIR/$NAME/README_zh.md"
+for readme in "$ROOT"/README*.md; do
+  cp "$readme" "$TARGET_DIR/$NAME/"
+done
 cp "$ROOT/.env.example" "$TARGET_DIR/$NAME/.env.example"
 if [ -d "$ROOT/skills" ]; then
   cp -R "$ROOT/skills" "$TARGET_DIR/$NAME/skills"

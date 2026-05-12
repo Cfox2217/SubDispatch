@@ -1,10 +1,16 @@
 # SubDispatch
 
-[中文](README.md) | [English](README_en.md)
+[中文](README.md) | [English](README_en.md) | [日本語](README_ja.md) | [한국어](README_ko.md) | [Français](README_fr.md)
 
 SubDispatch 是一个本地脚手架，用于让主 LLM 并行运行子编码代理。主 LLM 负责规划、审查、合并决策和冲突解决。SubDispatch 仅提供隔离执行、状态轮询、产物收集和工作树清理。
 它以 Rust 单二进制形式提供 CLI、MCP stdio、worker 调度、git worktree 管理、
 Claude hook 记录和本地 Setup/Activity UI。
+
+## 为什么有五国语言
+
+因为这个项目的核心卖点就是“把活分出去”。如果 README 还只有一种语言，
+那就像做了一个并行代理调度器，最后让一个代理坐在角落里手搓说明书。
+现在它至少会用中文默认开门，同时用英语、日语、韩语和法语假装自己很国际化。
 
 运行时依赖刻意保持很小：
 

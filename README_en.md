@@ -1,6 +1,6 @@
 # SubDispatch
 
-[中文](README.md) | [English](README_en.md)
+[中文](README.md) | [English](README_en.md) | [日本語](README_ja.md) | [한국어](README_ko.md) | [Français](README_fr.md)
 
 SubDispatch is a local scaffold for a primary LLM to run child coding agents in
 parallel. The primary LLM owns planning, review, merge decisions, and conflict
@@ -8,6 +8,14 @@ resolution. SubDispatch only provides isolated execution, status polling,
 artifact collection, and worktree cleanup. It ships as a Rust single-binary
 local tool for CLI, MCP stdio, worker dispatch, git worktree management, Claude
 hook recording, and the local Setup/Activity UI.
+
+## Why Five Languages
+
+Because the whole point of this project is to delegate work. Shipping a
+parallel-agent dispatcher with a one-language README would be a little like
+hiring a team and then making one intern write all the signs by hand. Chinese is
+the default door; English, Japanese, Korean, and French are here so SubDispatch
+can at least pretend it packed a passport.
 
 Runtime dependencies are intentionally small:
 
@@ -206,7 +214,7 @@ The Web UI is intentionally not a task console. It provides Setup checks,
 and Claude hook activity. The primary LLM still creates tasks through MCP or
 CLI.
 
-## Install And Release
+## Install and Release
 
 Install the global MCP entry and bundled skill once:
 
